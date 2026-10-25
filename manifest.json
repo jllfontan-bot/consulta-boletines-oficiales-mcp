@@ -1,0 +1,56 @@
+{
+  "manifest_version": "0.3",
+  "name": "boe-consolidada",
+  "display_name": "Consulta Boletines Oficiales - Legislación consolidada v1.6.1",
+  "version": "1.6.1",
+  "description": "No lee archivos del ordenador: solo consulta boe.es y api.euskadi.eus, con caché propia en ~/.cache/. Consulta y verificación de legislación española (BOE), sentencias del Tribunal Constitucional, actos y anuncios de empresas en el BORME y, para el País Vasco, del BOPV vía Open Data Euskadi.",
+  "long_description": "**⚠️ ¿Por qué sale el aviso de \"acceso a todo lo que hay en su ordenador\"?** Es automático: Claude Desktop lo muestra igual para cualquier extensión de este tipo (servidor local), no es algo que haya detectado en esta en concreto.\n\n**✅ Por qué puedes instalar tranquilo**: solo consulta dos páginas oficiales del Gobierno — boe.es (Boletín Oficial del Estado) y la web del Gobierno Vasco — para buscar leyes. No accede a internet en general.\n\n**Lo único que guarda en tu ordenador** son sus propias búsquedas, en una carpeta propia (~/.cache/boe-consolidada-mcp/), para no repetirlas. No toca tus documentos, fotos, correos ni ningún otro archivo.\n\n**CENDOJ, solo con tu permiso**: el conector no accede al CENDOJ (jurisprudencia del Supremo y Audiencias). Si quieres consultarlo, Claude te pedirá confirmación antes de abrirlo con su navegador y, si autorizas, hará él la consulta en tu nombre. **Necesita un navegador real: en el Chat de Claude Desktop, la extensión Claude in Chrome conectada, que solo existe en los planes de pago de Claude (no en el gratuito).** Si no la tienes (por ejemplo, con el plan gratuito), o dices que no, te explica qué falta y te da el enlace y los pasos para consultarlo tú y pegarle el resultado.\n\n---\n\nDa a Claude acceso directo a la colección de legislación consolidada de la Agencia Estatal BOE, a las sentencias del Tribunal Constitucional publicadas en el BOE, a los actos y anuncios de empresas del BORME (Boletín Oficial del Registro Mercantil), y a la normativa del Boletín Oficial del País Vasco (BOPV) vía Open Data Euskadi.\n\n**Consulta (BOE)**: busca normas, obtén la ficha con su vigencia, el índice de artículos, el texto literal de un precepto en su versión vigente y el análisis de qué normas lo modifican o derogan. Incluye normativa de las 17 comunidades autónomas en la medida en que el BOE la recoge.\n\n**Consulta (Tribunal Constitucional)**: busca sentencias del TC publicadas en el BOE por rango de fechas y consulta su texto completo, materias y referencias a las normas afectadas — con el enlace a la sentencia y a su PDF oficial. No es CENDOJ ni depende de sus condiciones de reutilización: es el BOE publicando sus propias sentencias del TC por mandato legal.\n\n**Consulta (BORME)**: busca lo publicado sobre una empresa en el Boletín Oficial del Registro Mercantil por su denominación y un rango de fechas (31 días como máximo), en toda España o en una provincia: anuncios (juntas, fusiones, escisiones...) y actos inscritos (constituciones, nombramientos, ceses...). No es legislación. Solo por denominación de la empresa, nunca por nombre de persona: los nombres de administradores que publica el BORME son datos personales y solo se guardan en memoria, nunca en disco.\n\n**Consulta (País Vasco)**: busca disposiciones del BOPV por año/mes y consulta su texto completo, vigencia y referencias cruzadas vía la API de Open Data Euskadi — incluye Órdenes y Resoluciones (convocatorias, exenciones...) que no están en la colección consolidada del BOE.\n\n**Verificación**: pega una demanda, un recurso o un contrato y comprueba automáticamente cada cita legal — primero contra el BOE, y si la cita trae fecha de disposición y el BOE no la resuelve, también contra el BOPV. Dice si la norma existe, si sigue vigente, si el artículo citado existe realmente, y qué fuente la resolvió.\n\nFijado en el código, sin clave, cuenta ni servicio intermedio. Consulta Boletines Oficiales no es un servicio oficial ni está vinculada a la Agencia Estatal BOE ni al Gobierno Vasco: solo usa sus datos abiertos. Ningún texto devuelto tiene valor oficial: para efectos jurídicos debe consultarse la publicación oficial (el PDF) de cada fuente.",
+  "author": {
+    "name": "José Luis López Fontán",
+    "email": "jllfontan@gmail.com",
+    "url": "https://jllfontan-bot.github.io/consulta-boletines-oficiales/"
+  },
+  "documentation": "https://www.boe.es/datosabiertos/documentos/APIconsolidada.pdf",
+  "license": "EUPL-1.2 OR AGPL-3.0-only",
+  "keywords": ["boe", "legislacion", "derecho", "espana", "juridico", "consolidada", "citas", "euskadi", "bopv", "tribunal constitucional", "jurisprudencia", "borme", "registro mercantil"],
+  "privacy_policies": [
+    "https://www.boe.es/informacion/aviso_legal/index.php",
+    "https://opendata.euskadi.eus/general/-/informacion-legal-opendata/"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {}
+    }
+  },
+  "tools": [
+    { "name": "boe_buscar_normas", "description": "Busca normas en la legislación consolidada del BOE." },
+    { "name": "boe_ficha_norma", "description": "Ficha de una norma: título oficial, fechas, vigencia y derogación." },
+    { "name": "boe_indice_norma", "description": "Índice de artículos y disposiciones de una norma." },
+    { "name": "boe_texto_articulo", "description": "Texto literal de un artículo en su versión vigente hoy." },
+    { "name": "boe_analisis_norma", "description": "Materias, notas y normas que la modifican o derogan." },
+    { "name": "boe_resolver_norma", "description": "Convierte 'ET' o 'Código Penal' en su identificador BOE verificado." },
+    { "name": "boe_verificar_cita", "description": "Verifica una cita legal concreta contra el BOE y, si hace falta, contra el BOPV." },
+    { "name": "boe_verificar_escrito", "description": "Verifica todas las citas legales de un escrito, contra el BOE y el BOPV." },
+    { "name": "boe_comprobar_atajos", "description": "Audita la tabla interna de normas frecuentes." },
+    { "name": "euskadi_buscar_normativa", "description": "Busca disposiciones del BOPV (País Vasco) por año/mes, incluidas Órdenes y Resoluciones." },
+    { "name": "euskadi_texto_norma", "description": "Texto completo, vigencia y referencias cruzadas de una disposición del BOPV." },
+    { "name": "euskadi_verificar_cita", "description": "Verifica directamente una cita del BOPV citada por su fecha de disposición." },
+    { "name": "boe_tc_buscar_sentencias", "description": "Busca sentencias del Tribunal Constitucional publicadas en el BOE por rango de fechas." },
+    { "name": "boe_tc_texto_sentencia", "description": "Texto completo, materias y referencias de una sentencia del TC, con su url y PDF oficial." },
+    { "name": "boe_borme_buscar", "description": "Busca actos y anuncios de una empresa en el BORME (Registro Mercantil) por denominación y fechas." },
+    { "name": "boe_borme_texto", "description": "Texto de un anuncio del BORME, o solo los actos de una empresa en un documento de provincia." },
+    { "name": "boe_elegir_ambito", "description": "Formulario (experimental) para elegir el ámbito de búsqueda: BOE, TC, CENDOJ, comunidad autónoma." },
+    { "name": "boe_ambito_seleccionado", "description": "Uso interno del formulario de ámbito." },
+    { "name": "cendoj_pedir_permiso", "description": "Pide tu confirmación antes de que Claude consulte el CENDOJ con su navegador (necesita Claude en Chrome)." },
+    { "name": "cendoj_permiso_respuesta", "description": "Uso interno de la ventana de permiso del CENDOJ." }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "node": ">=18.0.0" }
+  }
+}
