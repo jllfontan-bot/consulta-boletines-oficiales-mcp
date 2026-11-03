@@ -2,13 +2,13 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.jllfontan-bot/consulta-boletines-oficiales",
   "title": "Consulta Boletines Oficiales - Legislación consolidada",
-  "description": "Legislación consolidada, sentencias del Constitucional, BORME y BOPV, con citas verificadas",
-  "version": "1.6.1",
+  "description": "Legislación consolidada, sentencias del TC, BORME, BOPV y normativa de la UE, con citas verificadas",
+  "version": "1.7.0",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/jllfontan-bot/consulta-boletines-oficiales-mcp/releases/download/v1.6.1/consulta-boletines-oficiales-v1.6.1.mcpb",
-      "fileSha256": "743bf785c67b93b1c03717250eda4195793f6b48dcbca18f4a27fa4576b54368",
+      "identifier": "https://github.com/jllfontan-bot/consulta-boletines-oficiales-mcp/releases/download/v1.7.0/consulta-boletines-oficiales-v1.7.0.mcpb",
+      "fileSha256": "984d9175b7530738bfd83044a567b2b5f3061e7ee5287eb00528e41eb8518921",
       "transport": {
         "type": "stdio"
       }

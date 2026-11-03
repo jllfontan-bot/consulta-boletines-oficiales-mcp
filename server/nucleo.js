@@ -35,6 +35,8 @@ const crypto = require('node:crypto');
 const BASE_HOST = 'www.boe.es';
 const BASE_PATH = '/datosabiertos/api/legislacion-consolidada';
 const EUSKADI_HOST = 'api.euskadi.eus';
+// Oficina de Publicaciones de la UE (CELLAR, base de EUR-Lex), desde la 1.7.0.
+const UE_HOST = 'publications.europa.eu';
 
 /*
  * api.euskadi.eus presenta su cadena de certificados firmada por IZENPE S.A.
@@ -255,7 +257,7 @@ function resolverRedireccion(location, host, path) {
 
 /*
  * Transporte HTTP inyectable. Recibe SIEMPRE un host de la lista fija
- * (BASE_HOST / EUSKADI_HOST); nunca se construye desde la entrada del usuario.
+ * (BASE_HOST / EUSKADI_HOST / UE_HOST); nunca se construye desde la entrada del usuario.
  * Devuelve { status, headers, body }. Por defecto usa node:https; la app de
  * escritorio puede sustituirlo (p. ej. por el cliente `net` de Electron, que
  * respeta el proxy de Windows) con configurar({ transporte }).
@@ -282,7 +284,7 @@ function transporteHttps({ host, path: ruta, accept, ca, timeoutMs }) {
         res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
       }
     );
-    req.on('timeout', () => { req.destroy(new Error('timeout tras 30 s')); });
+    req.on('timeout', () => { req.destroy(new Error(`timeout tras ${Math.round(timeoutMs / 1000)} s`)); });
     req.on('error', reject);
     req.end();
   });
@@ -306,18 +308,19 @@ function configurar(opciones = {}) {
   }
 }
 
-async function httpGet(path, accept, redirects = 0, host = BASE_HOST) {
-  if (host !== BASE_HOST && host !== EUSKADI_HOST) throw new Error(`host no permitido: ${host}`);
+async function httpGet(path, accept, redirects = 0, host = BASE_HOST, timeoutMs = 30000) {
+  if (host !== BASE_HOST && host !== EUSKADI_HOST && host !== UE_HOST) throw new Error(`host no permitido: ${host}`);
   const res = await transporteHttp({
     host,
     path,
     accept,
     ca: host === EUSKADI_HOST ? EUSKADI_CA_LIST : undefined,
-    timeoutMs: 30000,
+    timeoutMs,
   });
   const location = res.headers && res.headers.location;
-  if ([301, 302, 307, 308].includes(res.status) && location && redirects < 5) {
-    return httpGet(resolverRedireccion(location, host, path), accept, redirects + 1, host);
+  // 303: CELLAR (UE) responde así a la negociación de contenido; todo es GET, así que se sigue igual.
+  if ([301, 302, 303, 307, 308].includes(res.status) && location && redirects < 5) {
+    return httpGet(resolverRedireccion(location, host, path), accept, redirects + 1, host, timeoutMs);
   }
   return { status: res.status, body: res.body };
 }
@@ -1493,6 +1496,605 @@ async function textoBorme(id, denominacion) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Unión Europea — CELLAR (Oficina de Publicaciones, base de EUR-Lex)  */
+/*                                                                      */
+/* Estudio y comprobación en vivo en docs/estudio-normativa-europea.md  */
+/* (03/11/2026). Host fijo `publications.europa.eu`, solo GET:          */
+/*  - SPARQL (/webapi/rdf/sparql): ficha, versiones consolidadas,       */
+/*    actos que modifican y el documento XHTML de cada idioma.          */
+/*  - /resource/cellar/{uuid}.{expr}.{manif}/DOC_n: el XHTML en sí.     */
+/* El idioma se elige en la consulta SPARQL (expresión SPA o ENG), no   */
+/* con Accept-Language: así el documento es el del idioma pedido por    */
+/* construcción y nunca se cambia de idioma en silencio.                */
+/* El CELEX solo entra en la consulta si pasa RE_CELEX_UE (sin          */
+/* inyección posible); de las palabras de búsqueda solo pasan letras y */
+/* números (buscarNormasUE).                                            */
+/* La web de EUR-Lex (eur-lex.europa.eu) NO se consulta nunca: tiene    */
+/* cortafuegos anti-bots; solo se da como enlace.                       */
+/* ------------------------------------------------------------------ */
+
+const UE_SPARQL_PATH = '/webapi/rdf/sparql';
+const FUENTE_UE = 'Oficina de Publicaciones de la UE · CELLAR (EUR-Lex)';
+const AVISO_UE =
+  '© Unión Europea, https://eur-lex.europa.eu — fuente distinta del BOE. Reutilización autorizada (Decisión 2011/833/UE); el texto consolidado se ofrece bajo licencia CC BY 4.0 y aquí se ha extraído y limpiado de su XHTML (sin notas ni marcas de modificación ►M). El texto consolidado es un instrumento de documentación sin efecto jurídico: solo es auténtico lo publicado en el Diario Oficial de la Unión Europea (Reglamento (UE) n.º 216/2013). Para efectos jurídicos, usa el enlace "url_doue".';
+
+const IDIOMAS_UE = {
+  es: { codigo: 'SPA', eurlex: 'ES', eli: 'spa', nombre: 'castellano', articulo: 'Artículo' },
+  en: { codigo: 'ENG', eurlex: 'EN', eli: 'eng', nombre: 'inglés', articulo: 'Article' },
+};
+const LENGUA_UE = 'http://publications.europa.eu/resource/authority/language/';
+const XSD_STRING = '^^<http://www.w3.org/2001/XMLSchema#string>';
+const TIPOS_UE = { R: 'reg', L: 'dir', D: 'dec' };
+const NOMBRE_TIPO_UE = { R: 'Reglamento', L: 'Directiva', D: 'Decisión' };
+// Sector 3 (legislación) y versiones consolidadas (sector 0 + fecha de la versión).
+const RE_CELEX_UE = /^([03])(\d{4})([RLD])(\d{4})(?:-(\d{8}))?$/;
+const UE_TEXTO_TTL_MS = TEXTO_TTL_MS;
+
+/** 'es' | 'en' a partir de lo que escriba el usuario o el modelo; por defecto castellano. */
+function idiomaUE(v) {
+  if (v === undefined || v === null || v === '') return 'es';
+  const n = norm(v);
+  if (['es', 'spa', 'castellano', 'espanol', 'spanish'].includes(n)) return 'es';
+  if (['en', 'eng', 'ingles', 'english'].includes(n)) return 'en';
+  throw new Error(`idioma no admitido: "${v}". Solo castellano ("es") o inglés ("en").`);
+}
+
+function partesCelex(celex) {
+  const m = RE_CELEX_UE.exec(String(celex || '').trim().toUpperCase());
+  if (!m) return null;
+  return { celex: m[0], sector: m[1], anio: m[2], tipo: m[3], numero: String(Number(m[4])), version: m[5] || null, base: `3${m[2]}${m[3]}${m[4]}` };
+}
+
+/** Enlaces de procedencia: EUR-Lex (consulta) y ELI del DOUE (la publicación auténtica). */
+function enlacesUE(celex, idioma) {
+  const p = partesCelex(celex);
+  const L = IDIOMAS_UE[idioma];
+  const eli = `https://data.europa.eu/eli/${TIPOS_UE[p.tipo]}/${p.anio}/${p.numero}/oj`;
+  return {
+    url: `https://eur-lex.europa.eu/legal-content/${L.eurlex}/TXT/?uri=CELEX:${p.celex}`,
+    url_doue: `${eli}/${L.eli}`,
+    eli,
+  };
+}
+
+function valoresSparql(data) {
+  const filas = (data && data.results && data.results.bindings) || [];
+  return filas.map((f) => Object.fromEntries(Object.entries(f).map(([k, v]) => [k, v && v.value])));
+}
+
+// Búsqueda por texto: CELLAR tarda a veces 30 s en la primera ejecución de una consulta y
+// 0,1 s al repetirla (medido el 03/11/2026). Primer intento corto y un reintento.
+const UE_BUSQUEDA_TIMEOUT_MS = 15000;
+
+async function sparqlUE(consulta, ttlMsDisco, { timeoutMs = 30000, reintentarTimeout = false } = {}) {
+  const reqPath = `${UE_SPARQL_PATH}?query=${encodeURIComponent(consulta)}`;
+  const key = 'Q' + UE_HOST + reqPath;
+  const mem = cacheGet(key);
+  if (mem) return mem;
+  const disco = ttlMsDisco > 0 ? cacheDiskGet(key, ttlMsDisco) : null;
+  if (disco) { cacheSet(key, disco); return disco; }
+  let res;
+  for (let intento = 1; ; intento++) {
+    try {
+      res = await httpGet(reqPath, 'application/sparql-results+json', 0, UE_HOST, timeoutMs);
+      // 503 «Web Site Under Maintenance» pasajero (visto el 03/11/2026): un reintento.
+      if ([502, 503, 504].includes(res.status) && intento < 2) { await new Promise((r) => setTimeout(r, 1000)); continue; }
+      break;
+    } catch (e) {
+      if (/timeout tras/.test(e.message)) {
+        if (reintentarTimeout && intento < 2) continue;
+        throw new ApiError(504, `La Oficina de Publicaciones de la UE no respondió${reintentarTimeout ? ' tras dos intentos' : ''}. Si era una búsqueda, prueba de nuevo dentro de un momento, con palabras más concretas o acotando el tipo de acto.`);
+      }
+      // CELLAR corta a veces la conexión (ETIMEDOUT/ECONNRESET, visto el 03/11/2026): un reintento.
+      if (intento >= 2 || !/ETIMEDOUT|ECONNRESET|socket hang up|EPIPE/i.test(e.message)) throw e;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  if (res.status >= 400) throw new ApiError(res.status, `${UE_HOST} respondió ${res.status}. ${String(res.body).slice(0, 200)}`);
+  let filas;
+  try {
+    filas = valoresSparql(JSON.parse(res.body));
+  } catch (e) {
+    throw new ApiError(502, `${UE_HOST} no devolvió JSON válido.`);
+  }
+  cacheSet(key, filas);
+  if (ttlMsDisco > 0) cacheDiskSet(key, filas);
+  return filas;
+}
+
+const PREFIJO_CDM = 'PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>\n';
+
+// Atajos de actos frecuentes (siglas o nombres usuales en castellano e inglés).
+// Auditados contra CELLAR en test/vivo.js: cada CELEX tiene que dar el título esperado.
+const ATAJOS_UE = [
+  { celex: '32016R0679', siglas: ['RGPD', 'GDPR', 'Reglamento general de protección de datos', 'General Data Protection Regulation'], clave: /protecci[oó]n de las personas f[ií]sicas|protection of natural persons/i },
+  { celex: '32024R1689', siglas: ['Reglamento de Inteligencia Artificial', 'Reglamento de IA', 'Ley de IA', 'AI Act', 'Artificial Intelligence Act'], clave: /inteligencia artificial|artificial intelligence/i },
+  { celex: '32022R2065', siglas: ['Reglamento de Servicios Digitales', 'DSA', 'Digital Services Act'], clave: /servicios digitales|digital services/i },
+  { celex: '32022R1925', siglas: ['Reglamento de Mercados Digitales', 'DMA', 'Digital Markets Act'], clave: /mercados disputables|contestable and fair markets/i },
+  { celex: '32012R1215', siglas: ['Bruselas I bis', 'Brussels I bis', 'Brussels I recast'], clave: /competencia judicial|jurisdiction/i },
+  { celex: '32008R0593', siglas: ['Roma I', 'Rome I'], clave: /obligaciones contractuales|contractual obligations/i },
+  { celex: '32007R0864', siglas: ['Roma II', 'Rome II'], clave: /obligaciones extracontractuales|non-contractual obligations/i },
+  { celex: '32010R1259', siglas: ['Roma III', 'Rome III'], clave: /divorcio|divorce/i },
+  { celex: '32012R0650', siglas: ['Reglamento de sucesiones', 'Reglamento europeo de sucesiones', 'Succession Regulation'], clave: /sucesiones|succession/i },
+  { celex: '32019R1111', siglas: ['Bruselas II ter', 'Brussels II ter', 'Brussels IIb'], clave: /responsabilidad parental|parental responsibility/i },
+  // Derogado (lo sustituyó el 2019/1111), pero se sigue citando: la ficha lo dice (NORMA_NO_VIGENTE y fin_de_vigencia).
+  { celex: '32003R2201', siglas: ['Bruselas II bis', 'Brussels II bis', 'Brussels IIa'], clave: /materia matrimonial|matrimonial matters/i, vigente: false },
+  { celex: '32015R0848', siglas: ['Reglamento de insolvencia', 'Insolvency Regulation'], clave: /insolvencia|insolvency/i },
+];
+
+/**
+ * Nombres usuales de un acto según la tabla de atajos (comprobada en vivo), para que Claude no
+ * ponga apodos de memoria (prueba real del 03/11/2026: «Roma III», «Bruselas II ter»). null si no está.
+ */
+function conocidoComoUE(celex) {
+  const p = partesCelex(celex);
+  const a = p && ATAJOS_UE.find((x) => x.celex === p.base);
+  return a ? a.siglas : null;
+}
+
+function buscarAtajoUE(texto) {
+  const n = norm(texto).replace(/^(el|la|del|de la|de)\s+/, '').trim();
+  if (!n) return null;
+  return ATAJOS_UE.find((a) => a.siglas.some((s) => norm(s) === n)) || null;
+}
+
+/**
+ * Candidatos de CELEX a partir de una cita ("Reglamento (UE) 2016/679",
+ * "Directiva 95/46/CE", "Reglamento (CE) n.º 44/2001"). Desde 2015 todos los
+ * actos se numeran AAAA/N; antes, los reglamentos se citaban N/AAAA y las
+ * directivas y decisiones AA/N o AAAA/N. Se devuelve el orden más probable
+ * primero; quien llama comprueba en CELLAR cuál existe (regla 4).
+ */
+function celexDeCita(texto) {
+  const t = String(texto || '');
+  const directo = partesCelex(t.replace(/^\s*CELEX\s*:?\s*/i, ''));
+  if (directo) return [directo.base];
+  const atajo = buscarAtajoUE(t);
+  if (atajo) return [atajo.celex];
+  let tipo = null;
+  if (/\b(?:reglamento|regulation)\b/i.test(t)) tipo = 'R';
+  else if (/\b(?:directiva|directive)\b/i.test(t)) tipo = 'L';
+  else if (/\b(?:decisi[oó]n|decision)\b/i.test(t)) tipo = 'D';
+  const m = /\b(\d{1,4})\/(\d{1,4})\b/.exec(t);
+  if (!tipo || !m) return [];
+  const anioDe = (s) => {
+    const n = Number(s);
+    if (s.length === 4) return n >= 1952 && n <= new Date().getFullYear() + 1 ? n : null;
+    if (s.length === 2) return n >= 52 ? 1900 + n : null; // antes de 2000 se citaba con dos cifras
+    return null;
+  };
+  const cel = (anio, num) => (anio && Number(num) > 0 && Number(num) < 10000 ? `3${anio}${tipo}${String(Number(num)).padStart(4, '0')}` : null);
+  const anioNumero = cel(anioDe(m[1]), m[2]);
+  const numeroAnio = cel(anioDe(m[2]), m[1]);
+  let orden;
+  if (Number(m[1]) >= 2015 && m[1].length === 4) orden = [anioNumero, numeroAnio];
+  else if (tipo === 'R' && anioDe(m[2])) orden = [numeroAnio, anioNumero];
+  else orden = [anioNumero, numeroAnio];
+  return [...new Set(orden.filter(Boolean))];
+}
+
+/** ¿La referencia es a un acto de la UE? (para no mandarla al BOE). */
+function esCitaUE(texto) {
+  const t = String(texto || '').trim();
+  if (!t) return false;
+  if (buscarAtajoUE(t) || /^\s*CELEX\s*:?\s*[03]\d{4}[RLD]\d{4}/i.test(t)) return true;
+  return /^\s*(?:(?:el|la|del|de\s+la)\s+)?(?:reglamento|directiva|decisi[oó]n|regulation|directive|decision)\b(?:\s+(?:delegad[oa]|de\s+ejecuci[oó]n|delegated|implementing))?\s*\(?\s*(?:UE|CE|CEE|EU|EC|EEC|Euratom)\b/i.test(t) ||
+    /^\s*(?:(?:la)\s+)?(?:directiva|directive)\s+\d{2,4}\/\d{1,4}\/(?:UE|CE|CEE|EU|EC|EEC)\b/i.test(t);
+}
+
+/** Fecha de fin de vigencia de CELLAR en dd/mm/aaaa; null si no consta o es la fecha «abierta» 9999-12-31. */
+function finDeVigenciaUE(fin) {
+  return fin && !/^9999/.test(fin) ? fmtFecha(fin.slice(0, 10).replace(/-/g, '')) : null;
+}
+
+/** Ficha de un acto (por CELEX ya validado): títulos en castellano e inglés, fecha, vigor, versiones y modificaciones. */
+async function fichaActoUE(celexBase) {
+  const p = partesCelex(celexBase);
+  if (!p || p.sector !== '3') throw new Error(`CELEX no válido para un acto legislativo de la UE: "${celexBase}" (formato 3AAAATNNNN, p. ej. 32016R0679).`);
+  const lit = `"${p.base}"${XSD_STRING}`;
+  const filas = await sparqlUE(
+    PREFIJO_CDM +
+      `SELECT ?lang ?titulo ?fecha ?vigor ?fin WHERE { ?w cdm:resource_legal_id_celex ${lit} .
+  OPTIONAL { ?w cdm:work_date_document ?fecha } OPTIONAL { ?w cdm:resource_legal_in-force ?vigor }
+  OPTIONAL { ?w cdm:resource_legal_date_end-of-validity ?fin }
+  OPTIONAL { ?e cdm:expression_belongs_to_work ?w ; cdm:expression_uses_language ?lang ; cdm:expression_title ?titulo .
+    FILTER(?lang IN (<${LENGUA_UE}SPA>, <${LENGUA_UE}ENG>)) } }`,
+    FICHA_TTL_MS
+  );
+  if (!filas.length) return null;
+  const titulos = {};
+  for (const f of filas) {
+    if (f.lang && f.titulo) titulos[f.lang.endsWith('SPA') ? 'es' : 'en'] = f.titulo;
+  }
+  const versiones = await sparqlUE(
+    PREFIJO_CDM +
+      `SELECT DISTINCT ?celex WHERE { ?w cdm:resource_legal_id_celex ${lit} . ?c cdm:act_consolidated_based_on_resource_legal ?w ; cdm:resource_legal_id_celex ?celex . }`,
+    FICHA_TTL_MS
+  );
+  const modificaciones = await sparqlUE(
+    PREFIJO_CDM +
+      `SELECT DISTINCT ?celex WHERE { ?w cdm:resource_legal_id_celex ${lit} . ?m cdm:resource_legal_amends_resource_legal ?w ; cdm:resource_legal_id_celex ?celex . }`,
+    FICHA_TTL_MS
+  );
+  const f0 = filas[0];
+  const hoy = hoyISO().replace(/-/g, '');
+  const consolidadas = versiones
+    .map((v) => partesCelex(v.celex))
+    .filter((v) => v && v.sector === '0' && v.version)
+    .sort((a, b) => a.version.localeCompare(b.version));
+  const vigor = f0.vigor === undefined ? null : f0.vigor === '1' || f0.vigor === 'true';
+  return {
+    celex: p.base,
+    tipo: NOMBRE_TIPO_UE[p.tipo],
+    titulos,
+    fecha_documento: f0.fecha ? fmtFecha(f0.fecha.replace(/-/g, '')) : null,
+    en_vigor: vigor,
+    fin_de_vigencia: finDeVigenciaUE(f0.fin),
+    versiones_consolidadas: consolidadas.map((v) => ({ celex: v.celex, desde: fmtFecha(v.version), futura: v.version > hoy })),
+    modificada_por: modificaciones.map((m) => m.celex).filter((c) => RE_CELEX_UE.test(c)).sort(),
+  };
+}
+
+/**
+ * Resuelve una cita, unas siglas o un CELEX a la ficha del acto, comprobada
+ * en CELLAR. null si ningún candidato existe (NO_RESUELTA, nunca una suposición).
+ */
+async function resolverNormaUE(texto) {
+  const candidatos = celexDeCita(texto);
+  for (const c of candidatos) {
+    const ficha = await fichaActoUE(c);
+    if (ficha) {
+      const atajo = buscarAtajoUE(texto);
+      return { ...ficha, resuelta_por: atajo ? 'atajo' : candidatos.length > 1 && c !== candidatos[0] ? 'número (orden alternativo año/número)' : 'número' };
+    }
+  }
+  return null;
+}
+
+/**
+ * Expresión (versión lingüística) de un CELEX en un idioma, con el formato que
+ * hay que pedirle, o null si no existe en ese idioma. Se pide la expresión y no
+ * un DOC_n concreto: una manifestación puede tener varios (imágenes incluidas) y
+ * CELLAR redirige (303) al documento principal del formato pedido.
+ */
+async function documentoUE(celex, idioma) {
+  const L = IDIOMAS_UE[idioma];
+  const filas = await sparqlUE(
+    PREFIJO_CDM +
+      `SELECT DISTINCT ?e ?tipo WHERE { ?w cdm:resource_legal_id_celex "${celex}"${XSD_STRING} .
+  ?e cdm:expression_belongs_to_work ?w ; cdm:expression_uses_language <${LENGUA_UE}${L.codigo}> .
+  ?m cdm:manifestation_manifests_expression ?e ; cdm:manifestation_type ?tipo . FILTER(STR(?tipo) IN ("xhtml", "html")) }`,
+    UE_TEXTO_TTL_MS
+  );
+  const validas = filas.filter((f) => f.e && /^https?:\/\/publications\.europa\.eu\/resource\/cellar\/[0-9a-f-]+\.\d+$/i.test(f.e));
+  const elegida = validas.find((f) => f.tipo === 'xhtml') || validas[0];
+  if (!elegida) return null;
+  return { ruta: new URL(elegida.e).pathname, accept: elegida.tipo === 'xhtml' ? 'application/xhtml+xml' : 'text/html' };
+}
+
+// Fin del cuerpo de un artículo: siguiente artículo o el siguiente elemento de estructura
+// (capítulo, sección, anexo, fórmula final, notas al pie).
+const RE_CABECERA_ART_UE = /<p\b[^>]*class="(?:oj-ti-art|title-article-norm)"[^>]*>([\s\S]*?)<\/p>/g;
+const RE_FIN_ART_UE = /class="(?:oj-ti-section-\d|oj-final|oj-note|oj-doc-end|title-division-\d|separator-annex|title-annex-\d|final|footnote)"|<hr\b/;
+const RE_SUBTITULO_ART_UE = /^\s*(?:<\/?div[^>]*>\s*)*<p\b[^>]*class="(?:oj-sti-art|stitle-article-norm)"[^>]*>([\s\S]*?)<\/p>/;
+
+function limpiarTextoUE(html) {
+  return xmlATexto(
+    String(html)
+      .replace(/<p\b[^>]*class="modref"[^>]*>[\s\S]*?<\/p>/g, '')
+      .replace(/<span\b[^>]*class="arrow"[^>]*>[\s\S]*?<\/span>/g, '')
+  )
+    .replace(/[►▼◄]\s*(?:[MABCR]\d*\b)?/g, '')
+    .replace(/[ \t ]{2,}/g, ' ')
+    .replace(/\n[ \t ]+/g, '\n')
+    // El número de apartado o la letra van en su propia celda: "1.\n\nEl interesado..." -> "1. El interesado..."
+    .replace(/^((?:\d+\.|\(?[a-z]{1,3}\)|\(?\d+\)))[ \t ]*\n+/gm, '$1 ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** Artículos de un XHTML de CELLAR (original "oj-*" o consolidado "*-norm"): [{ numero, titulo, texto }]. */
+function articulosXhtmlUE(html) {
+  const cuerpo = String(html);
+  const cabeceras = [];
+  let m;
+  RE_CABECERA_ART_UE.lastIndex = 0;
+  while ((m = RE_CABECERA_ART_UE.exec(cuerpo))) cabeceras.push({ ini: m.index, fin: RE_CABECERA_ART_UE.lastIndex, rotulo: limpiarTextoUE(m[1]) });
+  if (!cabeceras.length) return articulosHtmlAntiguoUE(cuerpo);
+  const out = [];
+  cabeceras.forEach((c, i) => {
+    const num = /^(?:art[íi]culo|article)\s+(.+)$/i.exec(c.rotulo.replace(/\s+/g, ' '));
+    if (!num) return;
+    let resto = cuerpo.slice(c.fin, i + 1 < cabeceras.length ? cabeceras[i + 1].ini : cuerpo.length);
+    let titulo = null;
+    const st = RE_SUBTITULO_ART_UE.exec(resto);
+    if (st) {
+      titulo = limpiarTextoUE(st[1]) || null;
+      resto = resto.slice(st[0].length);
+    }
+    const corte = resto.search(RE_FIN_ART_UE);
+    if (corte >= 0) resto = resto.slice(0, corte);
+    out.push({ numero: num[1].trim(), titulo, texto: limpiarTextoUE(resto) });
+  });
+  return out;
+}
+
+// HTML antiguo de EUR-Lex (actos anteriores a ~2010, p. ej. la Directiva 95/46/CE):
+// sin clases, cada artículo es un párrafo "<p>Artículo 2 </p>" y, si tiene título,
+// el párrafo siguiente ("<p>Definiciones</p>").
+const RE_CABECERA_ART_UE_ANTIGUA = /<p\b[^>]*>\s*((?:Art[íi]culo|Article)\s+\d+(?:\s*(?:bis|ter|quater|[a-z]))?)\s*<\/p>/gi;
+const RE_FIN_ART_UE_ANTIGUO = /<p\b[^>]*>\s*(?:Hecho en|Done at)\b|<hr\b|<p\b[^>]*>\s*(?:ANEXO|ANNEX)\b/i;
+
+function articulosHtmlAntiguoUE(cuerpo) {
+  const cabeceras = [];
+  let m;
+  RE_CABECERA_ART_UE_ANTIGUA.lastIndex = 0;
+  while ((m = RE_CABECERA_ART_UE_ANTIGUA.exec(cuerpo))) cabeceras.push({ ini: m.index, fin: RE_CABECERA_ART_UE_ANTIGUA.lastIndex, rotulo: m[1] });
+  return cabeceras.map((c, i) => {
+    let resto = cuerpo.slice(c.fin, i + 1 < cabeceras.length ? cabeceras[i + 1].ini : cuerpo.length);
+    const corte = resto.search(RE_FIN_ART_UE_ANTIGUO);
+    if (corte >= 0) resto = resto.slice(0, corte);
+    let titulo = null;
+    const st = /^\s*<p\b[^>]*>([^<]{1,150})<\/p>/.exec(resto);
+    if (st && !/^\s*(?:\d|\(|[a-z]\))/.test(st[1]) && !/[.:;]\s*$/.test(st[1])) {
+      titulo = limpiarTextoUE(st[1]) || null;
+      resto = resto.slice(st[0].length);
+    }
+    return { numero: c.rotulo.replace(/^\S+\s+/, '').trim(), titulo, texto: limpiarTextoUE(resto) };
+  });
+}
+
+/** "Artículo 17", "art. 17.1", "4 bis" -> "17" / "4 bis" (normalizado para comparar). */
+function claveArticuloUE(s) {
+  const t = norm(String(s || '').replace(/^\s*(?:art[íi]culos?|articles?|arts?\.?)\s*/i, ''));
+  const m = /^(\d+)(?:\s*(bis|ter|quater|quinquies|sexies|septies|octies|[a-z]\b))?/.exec(t);
+  return m ? (m[2] ? `${m[1]} ${m[2]}` : m[1]) : t;
+}
+
+async function articulosDocumentoUE(celex, idioma) {
+  const key = `UEART|${celex}|${idioma}`;
+  const mem = cacheGet(key);
+  if (mem) return mem;
+  const disco = cacheDiskGet(key, UE_TEXTO_TTL_MS);
+  if (disco) { cacheSet(key, disco); return disco; }
+  const doc = await documentoUE(celex, idioma);
+  if (!doc) return null;
+  const { status, body } = await httpGet(doc.ruta, doc.accept, 0, UE_HOST);
+  if (status >= 400) throw new ApiError(status, `${UE_HOST} respondió ${status} al pedir el texto de ${celex}.`);
+  const r = { celex, articulos: articulosXhtmlUE(body) };
+  cacheSet(key, r);
+  cacheDiskSet(key, r);
+  return r;
+}
+
+/** Versión que rige hoy: la última consolidada con fecha ya pasada (puede haber futuras); si no hay, el original. */
+function versionVigenteUE(ficha) {
+  const pasadas = ficha.versiones_consolidadas.filter((v) => !v.futura);
+  return pasadas.length ? pasadas[pasadas.length - 1] : null;
+}
+
+function cabeceraUE(ficha, idioma) {
+  return {
+    celex: ficha.celex,
+    tipo: ficha.tipo,
+    ...(conocidoComoUE(ficha.celex) ? { conocido_como: conocidoComoUE(ficha.celex) } : {}),
+    titulo: ficha.titulos[idioma] || null,
+    ...(idioma !== 'es' && ficha.titulos.es ? { titulo_es: ficha.titulos.es } : {}),
+    fecha_documento: ficha.fecha_documento,
+    en_vigor: ficha.en_vigor,
+    fin_de_vigencia: ficha.fin_de_vigencia,
+    ...enlacesUE(ficha.celex, idioma),
+  };
+}
+
+/** Ficha para la herramienta ue_ficha_norma. */
+async function fichaNormaUE(norma, idiomaPedido) {
+  const idioma = idiomaUE(idiomaPedido);
+  const ficha = await resolverNormaUE(norma);
+  if (!ficha) return { estado: 'NO_RESUELTA', idioma, detalle: noResueltaUE(norma) };
+  const vigente = versionVigenteUE(ficha);
+  return {
+    estado: ficha.en_vigor === false ? 'NORMA_NO_VIGENTE' : 'OK',
+    idioma,
+    resuelta_por: ficha.resuelta_por,
+    ...cabeceraUE(ficha, idioma),
+    ...(ficha.titulos[idioma] ? {} : { aviso_idioma: `CELLAR no tiene título en ${IDIOMAS_UE[idioma].nombre} para este acto.` }),
+    version_consolidada_vigente: vigente ? { ...vigente, ...enlacesUE(vigente.celex, idioma), url_doue: undefined, eli: undefined } : null,
+    versiones_consolidadas: ficha.versiones_consolidadas,
+    modificada_por: ficha.modificada_por,
+  };
+}
+
+function noResueltaUE(norma) {
+  return `No he localizado en CELLAR (EUR-Lex) ningún acto que corresponda a "${norma}". Cita el tipo y el número tal como aparecen en el DOUE (p. ej. "Reglamento (UE) 2016/679", "Directiva 95/46/CE", "Reglamento (CE) n.º 44/2001") o el número CELEX. Los Tratados y la Carta de Derechos Fundamentales no están cubiertos.`;
+}
+
+/**
+ * Texto de un artículo en la versión consolidada vigente hoy (o en el texto
+ * original si no hay consolidada), en castellano o en inglés. Si el documento
+ * no existe en ese idioma se dice, nunca se sirve otro idioma en su lugar.
+ */
+async function textoArticuloUE(norma, articulo, idiomaPedido) {
+  const idioma = idiomaUE(idiomaPedido);
+  const ficha = await resolverNormaUE(norma);
+  if (!ficha) return { estado: 'NO_RESUELTA', idioma, detalle: noResueltaUE(norma) };
+  const base = { idioma, resuelta_por: ficha.resuelta_por, ...cabeceraUE(ficha, idioma) };
+  // Un acto derogado tiene como última versión consolidada una hoja sin articulado
+  // (comprobado con la Directiva 95/46/CE, 01995L0046-20180525): se retrocede a la
+  // versión anterior con texto y, si no hay ninguna, al original. Se dice siempre cuál.
+  const pasadas = ficha.versiones_consolidadas.filter((v) => !v.futura).reverse();
+  const candidatas = [...pasadas, null];
+  let doc = null;
+  let vigente = null;
+  let sinArticulado = null;
+  for (const v of candidatas) {
+    const d = await articulosDocumentoUE(v ? v.celex : ficha.celex, idioma);
+    if (!d) {
+      if (v === pasadas[0] || (!pasadas.length && v === null)) {
+        return {
+          ...base,
+          estado: 'IDIOMA_NO_DISPONIBLE',
+          detalle: `CELLAR no tiene el texto ${v ? 'consolidado ' : ''}de ${v ? v.celex : ficha.celex} en ${IDIOMAS_UE[idioma].nombre}. Puedes pedirlo en ${idioma === 'es' ? 'inglés ("en")' : 'castellano ("es")'}.`,
+        };
+      }
+      continue;
+    }
+    if (d.articulos.length) { doc = d; vigente = v; break; }
+    if (!sinArticulado) sinArticulado = v ? v.celex : ficha.celex;
+  }
+  if (!doc) {
+    return { ...base, estado: 'SIN_TEXTO', detalle: `CELLAR no devuelve articulado para ${ficha.celex} en ${IDIOMAS_UE[idioma].nombre}. Consulta el DOUE ("url_doue").` };
+  }
+  const version = vigente
+    ? { version: 'texto consolidado', version_celex: vigente.celex, version_desde: vigente.desde, url_version: enlacesUE(vigente.celex, idioma).url }
+    : { version: 'texto original publicado en el DOUE (sin versión consolidada)', version_celex: ficha.celex, version_desde: null };
+  if (sinArticulado) version.aviso_version = `La versión ${sinArticulado} no tiene articulado (lo habitual cuando el acto ya está derogado): se muestra la última versión con texto.`;
+  const clave = claveArticuloUE(articulo);
+  const art = doc.articulos.find((a) => claveArticuloUE(a.numero) === clave);
+  if (!art) {
+    return {
+      ...base,
+      ...version,
+      estado: 'ARTICULO_NO_ENCONTRADO',
+      detalle: `El acto existe, pero su texto ${vigente ? 'consolidado' : 'original'} no tiene ningún artículo "${articulo}" (tiene ${doc.articulos.length} artículos).`,
+    };
+  }
+  const futuras = ficha.versiones_consolidadas.filter((v) => v.futura);
+  return {
+    ...base,
+    estado: ficha.en_vigor === false ? 'NORMA_NO_VIGENTE' : 'OK',
+    ...version,
+    nota_version: vigente
+      ? 'version_desde es la fecha de la versión consolidada que rige hoy, no necesariamente la fecha en que cambió este artículo.'
+      : 'No hay versión consolidada: es el texto tal como se publicó, sin las modificaciones posteriores que pueda haber (ver "modificada_por" en ue_ficha_norma).',
+    ...(futuras.length ? { versiones_futuras: futuras.map((v) => v.desde) } : {}),
+    articulo: `${IDIOMAS_UE[idioma].articulo} ${art.numero}`,
+    articulo_titulo: art.titulo,
+    texto: art.texto,
+  };
+}
+
+/** Verificación de una cita (para ue_verificar_cita y para boe_verificar_cita/escrito). */
+async function verificarCitaUE(norma, articulo, idiomaPedido) {
+  if (!articulo) {
+    const f = await fichaNormaUE(norma, idiomaPedido);
+    if (f.estado === 'OK') f.estado = 'NORMA_VIGENTE';
+    return { fuente: FUENTE_UE, ...f };
+  }
+  return { fuente: FUENTE_UE, ...(await textoArticuloUE(norma, articulo, idiomaPedido)) };
+}
+
+// Palabras vacías: el índice de texto de CELLAR se hunde con ellas (comprobado: "las" tardó 41 s).
+const PALABRAS_VACIAS_UE = new Set([
+  'de', 'del', 'la', 'las', 'los', 'el', 'en', 'por', 'para', 'con', 'que', 'una', 'uno', 'unos', 'unas', 'sobre', 'al', 'se',
+  'sus', 'como', 'entre', 'sin', 'este', 'esta', 'estos', 'estas', 'relativo', 'relativa', 'the', 'of', 'and', 'for', 'on', 'in',
+  'to', 'with', 'by', 'from', 'an', 'or', 'its', 'which', 'that', 'laying', 'down', 'concerning', 'regard',
+]);
+
+/** Palabras de búsqueda para bif:contains: solo letras y números, sin palabras vacías; "*" final = prefijo. */
+function palabrasBusquedaUE(texto) {
+  return [...new Set(
+    String(texto || '')
+      .toLowerCase()
+      .split(/\s+/)
+      .map((w) => {
+        const prefijo = /\*$/.test(w);
+        const limpia = w.replace(/[^\p{L}\p{N}]/gu, '');
+        return prefijo && limpia.length >= 4 ? limpia + '*' : limpia;
+      })
+      .filter((w) => w.replace('*', '').length >= 3 && !PALABRAS_VACIAS_UE.has(w))
+  )].slice(0, 6);
+}
+
+/**
+ * Búsqueda por palabras del título con el índice de texto de CELLAR
+ * (`bif:contains` de Virtuoso), en castellano, en inglés o en los dos a la vez
+ * (unión), devolviendo títulos y enlaces en `idioma`. Medido el 03/11/2026: todo
+ * el periodo (1952-hoy) en 0,1-0,5 s casi siempre, frente a 20-25 s con
+ * FILTER(CONTAINS(...)), que obligaba a trocear en tramos de 5 años; por eso tipo y
+ * años son opcionales. Buscar en los dos idiomas da más que cualquiera solo:
+ * "crédito consumo" + "consum* credit" encuentra seis directivas; solo en inglés,
+ * "consumer credit" se dejaba la 2008/48 y la 2023/2225 ("credit agreements for
+ * consumers"). El índice distingue tildes y no admite comillas: de cada palabra
+ * solo pasan letras y números (sin inyección posible).
+ */
+async function buscarNormasUE(p = {}) {
+  const idioma = idiomaUE(p.idioma);
+  const tipos = { reglamento: 'R', directiva: 'L', decision: 'D', regulation: 'R', directive: 'L' };
+  let tipo = null;
+  if (p.tipo !== undefined && p.tipo !== null && p.tipo !== '') {
+    tipo = tipos[norm(p.tipo)];
+    if (!tipo) throw new Error('tipo no válido: "reglamento", "directiva" o "decision" (o déjalo vacío para los tres).');
+  }
+  const vacio = (v) => v === undefined || v === null || v === '';
+  const anioMax = new Date().getFullYear() + 1;
+  const desde = vacio(p.anio_desde) ? null : Number(p.anio_desde);
+  const hasta = vacio(p.anio_hasta) ? desde : Number(p.anio_hasta);
+  if ((desde !== null && (!Number.isInteger(desde) || desde < 1952 || desde > anioMax)) ||
+      (hasta !== null && (!Number.isInteger(hasta) || hasta < 1952 || hasta > anioMax)) ||
+      (desde !== null && hasta !== null && hasta < desde)) {
+    throw new Error('anio_desde y anio_hasta, si se dan, deben ser años válidos, con anio_hasta >= anio_desde.');
+  }
+  // "texto" se admite como sinónimo de "texto_es".
+  const palabras = { es: palabrasBusquedaUE(vacio(p.texto_es) ? p.texto : p.texto_es), en: palabrasBusquedaUE(p.texto_en) };
+  const ramas = Object.entries(palabras).filter(([, ws]) => ws.length);
+  if (!ramas.length) throw new Error('Hacen falta palabras del título: "texto_es" (en castellano), "texto_en" (en inglés) o las dos, con al menos una palabra significativa de 3 letras o más.');
+  const limite = Math.min(Math.max(Number(p.limite) || 20, 1), 50);
+  const filtroFechas = [
+    desde !== null ? `?fecha >= "${desde}-01-01"^^<http://www.w3.org/2001/XMLSchema#date>` : null,
+    hasta !== null ? `?fecha <= "${hasta}-12-31"^^<http://www.w3.org/2001/XMLSchema#date>` : null,
+  ].filter(Boolean);
+  const rama = ([lengua, ws]) =>
+    `{ ?eb cdm:expression_title ?tb . ?tb bif:contains '${ws.map((w) => `"${w}"`).join(' AND ')}' .
+    ?eb cdm:expression_uses_language <${LENGUA_UE}${IDIOMAS_UE[lengua].codigo}> ; cdm:expression_belongs_to_work ?w . BIND("${lengua}" AS ?por) }`;
+  const filas = await sparqlUE(
+    PREFIJO_CDM +
+      `SELECT DISTINCT ?celex ?por ?titulo ?fecha ?vigor ?fin WHERE {
+  ${ramas.map(rama).join('\n  UNION\n  ')}
+  ?w cdm:resource_legal_id_celex ?celex ; cdm:work_date_document ?fecha .
+  FILTER(STRLEN(STR(?celex)) = 10 && STRSTARTS(STR(?celex), "3")${tipo ? ` && SUBSTR(STR(?celex), 6, 1) = "${tipo}"` : ''})
+  ${filtroFechas.length ? `FILTER(${filtroFechas.join(' && ')})` : ''}
+  OPTIONAL { ?w cdm:resource_legal_in-force ?vigor }
+  OPTIONAL { ?w cdm:resource_legal_date_end-of-validity ?fin }
+  OPTIONAL { ?e cdm:expression_belongs_to_work ?w ; cdm:expression_uses_language <${LENGUA_UE}${IDIOMAS_UE[idioma].codigo}> ; cdm:expression_title ?titulo . }
+} ORDER BY DESC(?fecha) LIMIT ${(limite + 1) * ramas.length}`,
+    BUSQUEDA_TTL_MS,
+    { timeoutMs: UE_BUSQUEDA_TIMEOUT_MS, reintentarTimeout: true }
+  );
+  // Una fila por acto e idioma en que coincidió: se agrupan conservando el orden (más recientes primero).
+  const porCelex = new Map();
+  for (const f of filas) {
+    if (!RE_CELEX_UE.test(f.celex || '')) continue;
+    const previa = porCelex.get(f.celex);
+    if (previa) { if (!previa.por.includes(f.por)) previa.por.push(f.por); continue; }
+    porCelex.set(f.celex, { ...f, por: [f.por] });
+  }
+  const todas = [...porCelex.values()];
+  const normas = todas.slice(0, limite).map((f) => ({
+    celex: f.celex,
+    tipo: NOMBRE_TIPO_UE[partesCelex(f.celex).tipo],
+    ...(conocidoComoUE(f.celex) ? { conocido_como: conocidoComoUE(f.celex) } : {}),
+    titulo: f.titulo || null,
+    ...(f.titulo ? {} : { aviso_idioma: `CELLAR no tiene título en ${IDIOMAS_UE[idioma].nombre} para este acto.` }),
+    fecha_documento: f.fecha ? fmtFecha(f.fecha.replace(/-/g, '')) : null,
+    en_vigor: f.vigor === undefined ? null : f.vigor === '1' || f.vigor === 'true',
+    // Sin esto, ante un acto "no vigente" Claude ponía la fecha de memoria (prueba real del 03/11/2026, Bruselas II bis).
+    fin_de_vigencia: finDeVigenciaUE(f.fin),
+    encontrada_por: f.por.map((l) => IDIOMAS_UE[l].nombre),
+    ...enlacesUE(f.celex, idioma),
+  }));
+  return {
+    idioma,
+    tipo: tipo ? NOMBRE_TIPO_UE[tipo] : 'reglamentos, directivas y decisiones',
+    anios: desde === null && hasta === null ? 'todos' : `${desde ?? 'inicio'}-${hasta ?? 'hoy'}`,
+    palabras: Object.fromEntries(ramas),
+    resultados: normas.length,
+    hay_mas: todas.length > limite || filas.length >= (limite + 1) * ramas.length,
+    normas,
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /* Fase 2: extracción y verificación de citas                          */
 /* ------------------------------------------------------------------ */
 
@@ -1528,6 +2130,14 @@ const RE_NORMA_POR_FECHA = new RegExp(
     '(?=([^;.()\\n]{0,100}))',
   'gi'
 );
+
+// Actos de la UE (1.7.0). "Reglamento (UE) n.º 1215/2012" no cabe en el contexto de
+// RE_ARTICULO, que se corta en "(" y en "." para no saltar a otra frase; antes de
+// buscar citas se reescribe como "Reglamento UE 1215/2012" (sin paréntesis ni "n.º").
+const RE_ACTO_UE_NORMALIZAR =
+  /\b(Reglamento|Directiva|Decisi[óo]n)((?:\s+(?:Delegad[oa]|de\s+Ejecuci[óo]n))?)\s*\(\s*(UE|CE|CEE|Euratom)(\s*,\s*Euratom)?\s*\)\s*(?:(?:n\.?\s*[ºo°]|núm)\.?\s*)?/gi;
+const RE_NORMA_UE =
+  /\b(?:Reglamento|Directiva|Decisi[óo]n)(?:\s+(?:Delegad[oa]|de\s+Ejecuci[óo]n))?\s+(?:UE|CE|CEE|Euratom)(?:\s+Euratom)?\s+\d{1,4}\/\d{1,4}\b|\bDirectiva\s+\d{2,4}\/\d{1,4}\/(?:UE|CE|CEE)\b/gi;
 
 /** Limpia el fragmento que sigue a un artículo hasta dejar el nombre de la norma. */
 function limpiarHint(s) {
@@ -1594,7 +2204,9 @@ function extraerCitas(texto) {
   // antes esa cita se quedaba sin norma y salía NO_RESUELTA. Se une la línea
   // con un espacio (absorbiendo la sangría, que si no se comería la ventana
   // de contexto); una línea en blanco sigue siendo un corte de párrafo.
-  texto = String(texto || '').replace(/[ \t]*\r?\n(?![ \t]*\r?\n)[ \t]*/g, ' ');
+  texto = String(texto || '')
+    .replace(/[ \t]*\r?\n(?![ \t]*\r?\n)[ \t]*/g, ' ')
+    .replace(RE_ACTO_UE_NORMALIZAR, (_, tipo, sub, org, euratom) => `${tipo}${sub} ${org}${euratom ? ' Euratom' : ''} `);
   const citas = [];
   const vistos = new Set();
   let m;
@@ -1631,6 +2243,15 @@ function extraerCitas(texto) {
     if (vistos.has(clave)) continue;
     vistos.add(clave);
     citas.push({ tipo: 'norma', cita: m[0].trim(), numero_oficial: m[2] });
+  }
+
+  RE_NORMA_UE.lastIndex = 0;
+  while ((m = RE_NORMA_UE.exec(texto))) {
+    const etiqueta = m[0].replace(/\s+/g, ' ').trim();
+    const clave = `U|${celexDeCita(etiqueta)[0] || norm(etiqueta)}`;
+    if (vistos.has(clave)) continue;
+    vistos.add(clave);
+    citas.push({ tipo: 'norma', cita: etiqueta, numero_oficial: etiqueta });
   }
 
   RE_NORMA_POR_FECHA.lastIndex = 0;
@@ -1874,6 +2495,17 @@ async function verificarCitaEuskadi(nombreNorma, articulo) {
  * vino de Euskadi, ni al revés (regla 7 de CLAUDE.md).
  */
 async function verificarCitaMultifuente(nombreNorma, articulo) {
+  // Un acto de la UE no está en el BOE consolidado ni en el BOPV: va directo a CELLAR.
+  if (esCitaUE(nombreNorma)) {
+    try {
+      return await verificarCitaUE(nombreNorma, articulo, 'es');
+    } catch (e) {
+      // La app de escritorio repite la lista de hosts como segunda barrera y, mientras
+      // no incluya la UE, una cita europea se queda sin resolver, como antes de la 1.7.0.
+      if (!/host no permitido/.test(e.message)) throw e;
+      return { fuente: FUENTE_UE, estado: 'NO_RESUELTA', detalle: `"${nombreNorma}" es un acto de la Unión Europea y la consulta de normativa europea no está disponible aquí.` };
+    }
+  }
   const rBoe = await verificarCita(nombreNorma, articulo);
   if (rBoe.estado !== 'NO_RESUELTA') return { fuente: 'BOE · legislación consolidada', ...rBoe };
 
@@ -1913,9 +2545,9 @@ async function verificarEscrito(texto, { maximo = 25, incluirTexto = false } = {
     citas_detectadas: citas.length,
     resumen: {
       correctas: cuenta('OK') + cuenta('NORMA_VIGENTE'),
-      normas_derogadas: cuenta('NORMA_DEROGADA'),
+      normas_derogadas: cuenta('NORMA_DEROGADA') + cuenta('NORMA_NO_VIGENTE'),
       articulos_inexistentes: cuenta('ARTICULO_NO_ENCONTRADO'),
-      no_resueltas: cuenta('NO_RESUELTA'),
+      no_resueltas: cuenta('NO_RESUELTA') + cuenta('IDIOMA_NO_DISPONIBLE'),
       errores: cuenta('ERROR'),
     },
     detalle: resultados,
@@ -2001,6 +2633,9 @@ module.exports = {
   AVISO, AVISO_EUSKADI, buscarNormativaEuskadi, textoNormativaEuskadi, resolverNormaEuskadi, verificarCitaEuskadi,
   // Tribunal Constitucional
   AVISO_TC, buscarSentenciasTC, textoSentenciaTC,
+  // Unión Europea (CELLAR)
+  AVISO_UE, FUENTE_UE, ATAJOS_UE, idiomaUE, celexDeCita, esCitaUE, articulosXhtmlUE, claveArticuloUE,
+  fichaActoUE, resolverNormaUE, fichaNormaUE, textoArticuloUE, verificarCitaUE, buscarNormasUE,
   // BORME
   AVISO_BORME, FUENTE_BORME, TIPO_BORME, CITA_BORME, PROVINCIAS_BORME, provinciaBorme, consultaDenominacion, coincideDenominacion,
   documentosSumarioBorme, metadatosBorme, actosDocumentoBorme, entradasIndiceBorme, buscarBorme, textoBorme,

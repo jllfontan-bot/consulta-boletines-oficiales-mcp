@@ -19,13 +19,16 @@
  * Fase 2: resolver referencias ("art. 56 ET") y verificar citas de un escrito.
  * Fase 3: normativa del País Vasco vía Open Data Euskadi.
  * Fase 4 (1.6.0): BORME (actos y anuncios del Registro Mercantil, mismo host www.boe.es).
+ * Fase 5 (1.7.0): normativa de la UE vía CELLAR (publications.europa.eu), en castellano o
+ * inglés — ver docs/estudio-normativa-europea.md.
  */
 
 'use strict';
 
 const N = require('./nucleo.js');
 const {
-  log, norm, hoyISO, ATAJOS, AVISO, AVISO_EUSKADI, AVISO_TC, AVISO_BORME, FUENTE_BORME, TIPO_BORME,
+  log, norm, hoyISO, ATAJOS, AVISO, AVISO_EUSKADI, AVISO_TC, AVISO_BORME, FUENTE_BORME, TIPO_BORME, AVISO_UE, FUENTE_UE,
+  buscarNormasUE, fichaNormaUE, textoArticuloUE, verificarCitaUE,
   analisisNorma, buscarBorme, buscarNormas, buscarNormativaEuskadi, buscarSentenciasTC, estadoBaseNorma,
   fichaNorma, indiceNorma, localizarBloque, resolverNorma, textoBloque, textoBorme, textoNormativaEuskadi, textoSentenciaTC,
   verificarCitaEuskadi, verificarCitaMultifuente, verificarEscrito,
@@ -77,6 +80,7 @@ const HTML_AMBITO = `<!DOCTYPE html>
     <legend>Fuentes</legend>
     <label><input type="checkbox" name="boe" checked> BOE (legislación estatal y autonómica)</label>
     <label><input type="checkbox" name="tc"> Tribunal Constitucional (sentencias)</label>
+    <label><input type="checkbox" name="ue"> Unión Europea (reglamentos, directivas y decisiones, vía EUR-Lex)</label>
     <label><input type="checkbox" name="cendoj"> Resto de jurisprudencia (CENDOJ — solo si lo autorizas en una ventana aparte)</label>
   </fieldset>
   <fieldset>
@@ -125,6 +129,7 @@ const HTML_AMBITO = `<!DOCTYPE html>
     estado.textContent = 'Enviando...';
     var boe = document.querySelector('input[name="boe"]').checked;
     var tc = document.querySelector('input[name="tc"]').checked;
+    var ue = document.querySelector('input[name="ue"]').checked;
     var cendoj = document.querySelector('input[name="cendoj"]').checked;
     var comunidades = Array.prototype.map.call(
       document.querySelectorAll('input[name="ccaa"]:checked'),
@@ -132,7 +137,7 @@ const HTML_AMBITO = `<!DOCTYPE html>
     );
     enviarPeticion('tools/call', {
       name: 'boe_ambito_seleccionado',
-      arguments: { boe: boe, tc: tc, cendoj: cendoj, comunidades: comunidades },
+      arguments: { boe: boe, tc: tc, ue: ue, cendoj: cendoj, comunidades: comunidades },
     }).then(function () {
       estado.textContent = 'Selección enviada. Sigue la conversación con Claude.';
     }).catch(function () {
@@ -144,15 +149,21 @@ const HTML_AMBITO = `<!DOCTYPE html>
 </body>
 </html>`;
 
+// Prueba real del 03/11/2026 (1.7.0): mientras esperaba el ámbito, Claude adelantó de memoria
+// «un punto de partida probable» (dos reglamentos de la UE). Acertó, pero es citar sin verificar.
+const REGLA_ESPERA_AMBITO =
+  'Mientras esperas la respuesta, no nombres ninguna norma, acto de la UE ni sentencia concretos (ni como ejemplo, ni como «punto de partida probable», ni para anticipar qué vas a buscar): limítate a pedir el ámbito.';
+
 function textoAmbitoFallback() {
   return (
     'Se ha mostrado al usuario un formulario para elegir el ámbito de búsqueda ' +
-    '(BOE, Tribunal Constitucional, CENDOJ, comunidad autónoma). Si tu cliente no ' +
-    'admite formularios interactivos y no ves confirmación de una selección, ' +
+    '(BOE, Tribunal Constitucional, Unión Europea, CENDOJ, comunidad autónoma). Si tu ' +
+    'cliente no admite formularios interactivos y no ves confirmación de una selección, ' +
     'pregunta tú mismo, textualmente: "¿Dónde quieres que busque? BOE (legislación ' +
-    'estatal y autonómica), también jurisprudencia del Tribunal Constitucional o del ' +
-    'resto de tribunales (CENDOJ), y/o normativa propia de alguna comunidad autónoma ' +
-    'en concreto — dime cuál(es)." y espera la respuesta antes de buscar nada.'
+    'estatal y autonómica), normativa de la Unión Europea, también jurisprudencia del ' +
+    'Tribunal Constitucional o del resto de tribunales (CENDOJ), y/o normativa propia de ' +
+    'alguna comunidad autónoma en concreto — dime cuál(es)." y espera la respuesta antes ' +
+    'de buscar nada. ' + REGLA_ESPERA_AMBITO
   );
 }
 
@@ -169,7 +180,7 @@ function textoAmbitoFallback() {
 /* pregunta en texto. Ninguna vía sustituye a la respuesta explícita.    */
 /* ------------------------------------------------------------------ */
 
-const VERSION = '1.6.1'; // debe coincidir con manifest.json (lo comprueba test/protocolo.js)
+const VERSION = '1.7.0'; // debe coincidir con manifest.json (lo comprueba test/protocolo.js)
 
 const RESOURCE_CENDOJ_URI = 'ui://boe-consolidada/cendoj-permiso.html';
 
@@ -534,10 +545,72 @@ const TOOLS = [
     },
   },
   {
+    name: 'ue_buscar_normas',
+    annotations: { title: 'Buscar normativa de la Unión Europea', readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    description:
+      'Busca reglamentos, directivas o decisiones de la Unión Europea por palabras de su título, en CELLAR (Oficina de Publicaciones de la UE, la base de EUR-Lex) — fuente distinta del BOE. Busca en los títulos en castellano ("texto_es"), en inglés ("texto_en") o en los dos a la vez, y devuelve títulos y enlaces en "idioma". DA SIEMPRE LOS DOS: encuentra más que cualquiera solo, porque cada idioma redacta los títulos a su manera (p. ej. texto_es "crédito consumo" y texto_en "consum* credit"). Busca en todos los años y tipos de acto salvo que acotes "tipo" o "anio_desde"/"anio_hasta": una sola llamada basta, no hace falta trocear por años. Todas las palabras de cada idioma deben aparecer en el título, escritas como en él (en castellano con sus tildes: "crédito", no "credito"); no busca sinónimos, así que si no sale nada prueba con otra palabra del título (p. ej. "matrimonial" además de "divorcio") o con un prefijo terminado en * ("divorci*", "consum*"). Cada resultado dice si está en vigor ("en_vigor") y, si ya no lo está, desde cuándo ("fin_de_vigencia", úsala en vez de calcularla tú), y en qué idioma coincidió ("encontrada_por"). Si ya sabes el número del acto, usa directamente ue_ficha_norma. Si el acto tiene un nombre usual, viene en "conocido_como": usa solo esos; no añadas apodos de memoria («Roma III», «Bruselas II bis»…) a actos que no lo traigan.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        texto_es: { type: 'string', description: 'Palabras del título en castellano, con tildes (p. ej. "crédito consumo"). Las palabras vacías ("de", "la"...) se ignoran.' },
+        texto_en: { type: 'string', description: 'Las mismas ideas en inglés, como se escribirían en el título oficial (p. ej. "consum* credit"). Recomendado siempre, junto con texto_es.' },
+        tipo: { type: 'string', enum: ['reglamento', 'directiva', 'decision'], description: 'Opcional. Tipo de acto; sin él, los tres.' },
+        anio_desde: { type: 'number', description: 'Opcional. Año del acto, inicio del rango; sin él, desde el principio.' },
+        anio_hasta: { type: 'number', description: 'Opcional. Fin del rango (por defecto, igual a anio_desde si se da; si no, hasta hoy).' },
+        idioma: { type: 'string', enum: ['es', 'en'], description: 'Idioma de los títulos y enlaces del resultado: castellano ("es", por defecto) o inglés ("en"). No depende del idioma de las palabras buscadas.' },
+        limite: { type: 'number', description: 'Máximo de resultados (por defecto 20, máximo 50).' },
+      },
+    },
+  },
+  {
+    name: 'ue_ficha_norma',
+    annotations: { title: 'Ficha de un acto de la Unión Europea', readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    description:
+      'Ficha de un reglamento, directiva o decisión de la UE: título oficial (en castellano o inglés), fecha, si está en vigor, versiones consolidadas (con la que rige hoy y las futuras) y actos que lo modifican, con enlaces a EUR-Lex y al DOUE (ELI). Acepta la cita tal como se escribe ("Reglamento (UE) 2016/679", "Directiva 95/46/CE", "Reglamento (CE) n.º 44/2001"), siglas frecuentes (RGPD, Reglamento de IA, DSA, DMA, Bruselas I bis, Bruselas II bis/ter, Roma I/II/III…) o el número CELEX (32016R0679). No cubre los Tratados ni la Carta de Derechos Fundamentales. Si el acto tiene un nombre usual, viene en "conocido_como": usa solo esos; no añadas apodos de memoria («Roma III», «Bruselas II bis»…) a actos que no lo traigan.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        norma: { type: 'string', description: 'Cita, siglas o CELEX del acto.' },
+        idioma: { type: 'string', enum: ['es', 'en'], description: 'Castellano ("es", por defecto) o inglés ("en").' },
+      },
+      required: ['norma'],
+    },
+  },
+  {
+    name: 'ue_texto_articulo',
+    annotations: { title: 'Texto de un artículo de un acto de la UE', readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    description:
+      'Texto literal de un artículo de un reglamento, directiva o decisión de la UE en la versión consolidada que rige hoy (o en el texto original si no hay consolidada), en castellano o en inglés. Si el texto no existe en el idioma pedido devuelve IDIOMA_NO_DISPONIBLE: nunca lo sustituye por otro idioma. El texto consolidado es documental, sin efecto jurídico: en cualquier cita da también "url_doue" (lo auténtico es el DOUE) y "version_desde".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        norma: { type: 'string', description: 'Cita, siglas o CELEX del acto ("RGPD", "Reglamento (UE) 2024/1689", "32012R1215").' },
+        articulo: { type: 'string', description: 'Número del artículo, p. ej. "17" o "4 bis".' },
+        idioma: { type: 'string', enum: ['es', 'en'], description: 'Castellano ("es", por defecto) o inglés ("en").' },
+      },
+      required: ['norma', 'articulo'],
+    },
+  },
+  {
+    name: 'ue_verificar_cita',
+    annotations: { title: 'Verificar una cita de normativa de la UE', readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+    description:
+      'Verifica una cita a un acto de la UE: que existe, si está en vigor y, si se da, que el artículo existe, con su texto vigente. Estados: OK, NORMA_VIGENTE, NORMA_NO_VIGENTE, ARTICULO_NO_ENCONTRADO, IDIOMA_NO_DISPONIBLE, NO_RESUELTA. boe_verificar_cita y boe_verificar_escrito ya mandan aquí solas las citas europeas (en castellano); usa esta herramienta para verificar en inglés.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        norma: { type: 'string', description: 'Acto citado ("Reglamento (UE) 2016/679", "RGPD", "Directiva 2019/1023").' },
+        articulo: { type: 'string', description: 'Artículo citado. Opcional.' },
+        idioma: { type: 'string', enum: ['es', 'en'], description: 'Castellano ("es", por defecto) o inglés ("en").' },
+      },
+      required: ['norma'],
+    },
+  },
+  {
     name: 'boe_elegir_ambito',
     annotations: { title: 'Elegir el ámbito de la búsqueda', readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     description:
-      'Muestra al usuario un formulario para elegir el ámbito de una investigación jurídica abierta: BOE, Tribunal Constitucional, CENDOJ, y/o una o varias comunidades autónomas. Llámala ANTES de buscar nada cuando la petición sea una investigación abierta ("qué dice la normativa sobre X"), nunca para una cita concreta ya identificada (usa boe_verificar_cita/euskadi_verificar_cita directamente en ese caso). No le pases argumentos. En clientes que admiten formularios interactivos (MCP Apps) se muestra un formulario real; en el resto, el resultado trae la pregunta en texto para que la hagas tú. Espera la respuesta (formulario o texto) antes de llamar a cualquier otra herramienta de búsqueda.',
+      'Muestra al usuario un formulario para elegir el ámbito de una investigación jurídica abierta: BOE, Tribunal Constitucional, Unión Europea, CENDOJ, y/o una o varias comunidades autónomas. Llámala ANTES de buscar nada cuando la petición sea una investigación abierta ("qué dice la normativa sobre X"), nunca para una cita concreta ya identificada (usa boe_verificar_cita/euskadi_verificar_cita directamente en ese caso). No le pases argumentos. En clientes que admiten formularios interactivos (MCP Apps) se muestra un formulario real; en el resto, el resultado trae la pregunta en texto para que la hagas tú. Espera la respuesta (formulario o texto) antes de llamar a cualquier otra herramienta de búsqueda. ' + REGLA_ESPERA_AMBITO,
     inputSchema: { type: 'object', properties: {} },
     _meta: { ui: { resourceUri: RESOURCE_AMBITO_URI } },
   },
@@ -550,6 +623,7 @@ const TOOLS = [
       properties: {
         boe: { type: 'boolean' },
         tc: { type: 'boolean' },
+        ue: { type: 'boolean' },
         cendoj: { type: 'boolean' },
         comunidades: { type: 'array', items: { type: 'string' } },
       },
@@ -695,16 +769,16 @@ async function ejecutar(name, args) {
     }
     case 'boe_verificar_cita': {
       const r = await verificarCitaMultifuente(args.norma, args.articulo);
-      const aviso = r.fuente === 'Open Data Euskadi · BOPV (Gobierno Vasco)' ? AVISO_EUSKADI : AVISO;
+      const aviso = r.fuente === 'Open Data Euskadi · BOPV (Gobierno Vasco)' ? AVISO_EUSKADI : r.fuente === FUENTE_UE ? AVISO_UE : AVISO;
       return { consultado: hoyISO(), cita: { norma: args.norma, articulo: args.articulo || null }, ...r, aviso };
     }
     case 'boe_verificar_escrito': {
       const r = await verificarEscrito(args.texto, { maximo: args.maximo, incluirTexto: args.incluir_texto });
       return {
-        fuente: 'BOE · legislación consolidada + Open Data Euskadi · BOPV (según cada cita, ver "fuente" en el detalle)',
+        fuente: 'BOE · legislación consolidada + Open Data Euskadi · BOPV + Oficina de Publicaciones de la UE · CELLAR (según cada cita, ver "fuente" en el detalle)',
         consultado: hoyISO(),
         ...r,
-        nota: 'Una cita NO_RESUELTA no significa que sea falsa: puede tratarse de normativa de otra comunidad autónoma, reglamentaria o europea que no está en ninguna de las fuentes de este conector. Revísala a mano.',
+        nota: 'Una cita NO_RESUELTA no significa que sea falsa: puede tratarse de normativa de otra comunidad autónoma, reglamentaria, o de un Tratado de la UE, que no está en ninguna de las fuentes de este conector. Revísala a mano. Cada cita lleva el aviso de su propia fuente: el texto consolidado de la UE es documental (lo auténtico es el DOUE).',
       };
     }
     case 'boe_comprobar_atajos': {
@@ -755,6 +829,28 @@ async function ejecutar(name, args) {
       const r = await textoBorme(args.id, args.denominacion);
       return { fuente: FUENTE_BORME, tipo: TIPO_BORME, consultado: hoyISO(), ...r, aviso: AVISO_BORME };
     }
+    case 'ue_buscar_normas': {
+      const r = await buscarNormasUE(args);
+      return {
+        fuente: FUENTE_UE,
+        consultado: hoyISO(),
+        ...r,
+        ...(r.resultados ? {} : { resultado: 'sin resultados', detalle: 'Ningún título en ese idioma contiene todas esas palabras (en el tipo y los años pedidos, si se acotaron). No significa que el acto no exista: prueba con menos palabras, con tildes, con otra palabra del título o con un prefijo terminado en *.' }),
+        aviso: AVISO_UE,
+      };
+    }
+    case 'ue_ficha_norma': {
+      const f = await fichaNormaUE(args.norma, args.idioma);
+      return { fuente: FUENTE_UE, consultado: hoyISO(), ...f, aviso: AVISO_UE };
+    }
+    case 'ue_texto_articulo': {
+      const t = await textoArticuloUE(args.norma, args.articulo, args.idioma);
+      return { fuente: FUENTE_UE, consultado: hoyISO(), ...t, aviso: AVISO_UE };
+    }
+    case 'ue_verificar_cita': {
+      const r = await verificarCitaUE(args.norma, args.articulo, args.idioma);
+      return { consultado: hoyISO(), cita: { norma: args.norma, articulo: args.articulo || null }, ...r, aviso: AVISO_UE };
+    }
     case 'boe_elegir_ambito': {
       return { formulario_mostrado: clienteAdmiteApps ? 'ámbito de búsqueda' : null, texto_alternativo_si_no_hay_formulario: textoAmbitoFallback() };
     }
@@ -768,6 +864,7 @@ async function ejecutar(name, args) {
       const partes = [];
       if (args.boe) partes.push('BOE');
       if (args.tc) partes.push('Tribunal Constitucional (boe_tc_*)');
+      if (args.ue) partes.push('Unión Europea: reglamentos, directivas y decisiones (ue_*, fuente distinta del BOE; en castellano salvo que el usuario pida inglés)');
       if (args.cendoj) partes.push('CENDOJ, resto de jurisprudencia (el conector no accede a él. Si vas a consultarlo con tu navegador, ANTES llama a cendoj_pedir_permiso y espera la autorización explícita del usuario; si no autoriza o no tienes navegador, da instrucciones/enlace de la sección ENLACES de las instrucciones del proyecto)');
       const comunidades = Array.isArray(args.comunidades) ? args.comunidades : [];
       if (comunidades.length) {
@@ -857,7 +954,7 @@ async function manejar(msg) {
         capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
         serverInfo: { name: 'boe-consolidada', version: VERSION },
         instructions:
-          'REGLA Nº 1, SIN EXCEPCIONES: si en ESTA conversación no has verificado una sentencia del Supremo, la Audiencia Nacional, los TSJ o las Audiencias en el CENDOJ con un navegador real, NO nombres ninguna: ni su número, ni ponente, fecha, ECLI o contenido, ni "la doctrina del Supremo (STS x/aaaa…)", ni "la muy conocida…", ni "me suena", ni como ejemplo, ni al ofrecer tu ayuda, ni "mientras tanto, de lo que recuerdo", ni "las fuentes secundarias dicen que trata de…", ni MIENTRAS ESPERAS la autorización del usuario para consultar el CENDOJ (en ese mensaje limítate a pedir el permiso; no describas la sentencia ni su materia). Cuando el usuario pida verificar una sentencia por su número, NO adelantes de qué trata: verifícala primero. Tampoco lo digas para negarte: ni "aunque me suene", ni "aunque la conozco", ni "aunque es muy citada" — di solo "no he podido verificarla". REGLA Nº 2: Claude en Chrome (la extensión de navegador que permitiría consultar el CENDOJ) solo está disponible en los planes de pago de Claude (Pro, Max, Team y Enterprise) y solo en Google Chrome; SIEMPRE que lo menciones al usuario, dilo en esa misma frase (p. ej. "Claude en Chrome, disponible solo en planes de pago"), y no se lo ofrezcas como solución sin decirlo. Puedes describir la materia sin citar sentencias y decir que la doctrina jurisprudencial hay que verificarla en el CENDOJ. Herramientas de consulta de legislación y jurisprudencia constitucional española: la colección consolidada del BOE (boe_*, estatal y autonómica en la medida en que el BOE la recoge), sentencias del Tribunal Constitucional publicadas en el BOE (boe_tc_*, distintas de la legislación — indícalo siempre), actos y anuncios de empresas publicados en el BORME (boe_borme_*, tampoco son legislación — indícalo; solo por denominación de la empresa: nunca busques ni recopiles información sobre personas físicas, cuyos nombres en el BORME son datos personales publicados solo para la publicidad mercantil) y, para el País Vasco específicamente, Open Data Euskadi/BOPV (euskadi_*, incluye Órdenes y Resoluciones que el BOE no tiene). No hay acceso a ninguna otra jurisprudencia (Supremo, Audiencias...): eso depende del CENDOJ, fuera de este conector. REGLA CENDOJ: el conector nunca accede al CENDOJ. Sin haber verificado una sentencia del Supremo/Audiencias en el CENDOJ, NO afirmes nada de ella (ni ponente, fecha, ECLI o contenido, ni de memoria): di que no has podido verificarla. "Navegador" significa una herramienta de navegación real (p. ej. la extensión Claude en Chrome), NUNCA la búsqueda web general (web_search/web_fetch): si solo dispones de búsqueda web, NO tienes acceso al CENDOJ ni a jurisprudencia que no sea del TC — no busques ni afirmes nada de ella; da el enlace https://www.poderjudicial.es/search/indexAN.jsp (SIEMPRE indexAN.jsp, NUNCA index.jsp: este último solo cubre el Tribunal Supremo) y las instrucciones para que lo consulte el usuario. Si tienes navegador real y el usuario quiere jurisprudencia del Supremo/Audiencias, ANTES de abrir poderjudicial.es llama a cendoj_pedir_permiso (ventana de confirmación) y espera su autorización explícita; con ella, la consulta la realizas TÚ con tu navegador, en nombre del usuario y para su uso particular (el conector sigue sin acceder al CENDOJ). LÍMITES de esa consulta (aviso legal y Reglamento 3/2010 del CGPJ): solo las consultas puntuales necesarias para la petición concreta del usuario, con pausa entre ellas; NUNCA descargas masivas, ni recorrer listados completos, ni guardar o redistribuir resoluciones, ni uso comercial; sin ella, da el enlace e instrucciones. SIN NAVEGADOR REAL (p. ej. el Chat de Claude Desktop sin la extensión Claude en Chrome conectada): cuando el usuario pida jurisprudencia del Supremo/Audiencias, díselo con claridad en las primeras líneas — (1) esta extensión nunca accede al CENDOJ (Reglamento 3/2010 del CGPJ); solo puedes consultarlo tú, en su nombre y con su autorización expresa, si dispones de un navegador real; (2) ahora no dispones de él, y para que lo consultes tú debe instalar y conectar la extensión Claude en Chrome con Claude Desktop (SIEMPRE que la menciones, di que solo está disponible en los planes de pago de Claude —Pro, Max, Team y Enterprise— y solo en Google Chrome); (3) mientras tanto, el enlace y los pasos para consultarlo él mismo. Aviso: Claude en Chrome solo está disponible en los planes de pago de Claude (Pro, Max, Team y Enterprise) y solo en Google Chrome; si el usuario tiene el plan gratuito, no le insistas en instalarlo: dile que en su plan la consulta debe hacerla él mismo (enlace, campo «Nº Resolución» con el número tal cual y «Tipo de órgano: Tribunal Supremo», sin fecha) y que te pegue el resultado para que lo analices. No lo presentes como un fallo ni prometas hacerlo más tarde sin navegador. Y sin verificarla en el CENDOJ NO nombres ninguna sentencia concreta: ni por su número, ni "que te suena", ni "muy conocida", ni como ejemplo. Úsalas como ÚNICA fuente para cualquier afirmación sobre normas, artículos o sentencias del TC españoles, o sobre lo publicado en el BORME. Nunca cites nada sin haberlo recuperado con estas herramientas. Si ninguna herramienta devuelve resultados, dilo explícitamente en vez de contestar de memoria. Cada fuente indica su propio aviso de valor no oficial en cada respuesta.',
+          'REGLA Nº 1, SIN EXCEPCIONES: si en ESTA conversación no has verificado una sentencia del Supremo, la Audiencia Nacional, los TSJ o las Audiencias en el CENDOJ con un navegador real, NO nombres ninguna: ni su número, ni ponente, fecha, ECLI o contenido, ni "la doctrina del Supremo (STS x/aaaa…)", ni "la muy conocida…", ni "me suena", ni como ejemplo, ni al ofrecer tu ayuda, ni "mientras tanto, de lo que recuerdo", ni "las fuentes secundarias dicen que trata de…", ni MIENTRAS ESPERAS la autorización del usuario para consultar el CENDOJ (en ese mensaje limítate a pedir el permiso; no describas la sentencia ni su materia). Cuando el usuario pida verificar una sentencia por su número, NO adelantes de qué trata: verifícala primero. Tampoco lo digas para negarte: ni "aunque me suene", ni "aunque la conozco", ni "aunque es muy citada" — di solo "no he podido verificarla". REGLA Nº 2: Claude en Chrome (la extensión de navegador que permitiría consultar el CENDOJ) solo está disponible en los planes de pago de Claude (Pro, Max, Team y Enterprise) y solo en Google Chrome; SIEMPRE que lo menciones al usuario, dilo en esa misma frase (p. ej. "Claude en Chrome, disponible solo en planes de pago"), y no se lo ofrezcas como solución sin decirlo. Puedes describir la materia sin citar sentencias y decir que la doctrina jurisprudencial hay que verificarla en el CENDOJ. Herramientas de consulta de legislación y jurisprudencia constitucional española: la colección consolidada del BOE (boe_*, estatal y autonómica en la medida en que el BOE la recoge), sentencias del Tribunal Constitucional publicadas en el BOE (boe_tc_*, distintas de la legislación — indícalo siempre), actos y anuncios de empresas publicados en el BORME (boe_borme_*, tampoco son legislación — indícalo; solo por denominación de la empresa: nunca busques ni recopiles información sobre personas físicas, cuyos nombres en el BORME son datos personales publicados solo para la publicidad mercantil) y, para el País Vasco específicamente, Open Data Euskadi/BOPV (euskadi_*, incluye Órdenes y Resoluciones que el BOE no tiene) y la normativa de la Unión Europea (ue_*: reglamentos, directivas y decisiones, en castellano o en inglés según el parámetro "idioma", desde CELLAR/EUR-Lex de la Oficina de Publicaciones de la UE — fuente distinta del BOE; su texto consolidado es documental, lo auténtico es el DOUE; nunca cambies de idioma sin decírselo al usuario). No hay acceso a ninguna otra jurisprudencia (Supremo, Audiencias...): eso depende del CENDOJ, fuera de este conector. REGLA CENDOJ: el conector nunca accede al CENDOJ. Sin haber verificado una sentencia del Supremo/Audiencias en el CENDOJ, NO afirmes nada de ella (ni ponente, fecha, ECLI o contenido, ni de memoria): di que no has podido verificarla. "Navegador" significa una herramienta de navegación real (p. ej. la extensión Claude en Chrome), NUNCA la búsqueda web general (web_search/web_fetch): si solo dispones de búsqueda web, NO tienes acceso al CENDOJ ni a jurisprudencia que no sea del TC — no busques ni afirmes nada de ella; da el enlace https://www.poderjudicial.es/search/indexAN.jsp (SIEMPRE indexAN.jsp, NUNCA index.jsp: este último solo cubre el Tribunal Supremo) y las instrucciones para que lo consulte el usuario. Si tienes navegador real y el usuario quiere jurisprudencia del Supremo/Audiencias, ANTES de abrir poderjudicial.es llama a cendoj_pedir_permiso (ventana de confirmación) y espera su autorización explícita; con ella, la consulta la realizas TÚ con tu navegador, en nombre del usuario y para su uso particular (el conector sigue sin acceder al CENDOJ). LÍMITES de esa consulta (aviso legal y Reglamento 3/2010 del CGPJ): solo las consultas puntuales necesarias para la petición concreta del usuario, con pausa entre ellas; NUNCA descargas masivas, ni recorrer listados completos, ni guardar o redistribuir resoluciones, ni uso comercial; sin ella, da el enlace e instrucciones. SIN NAVEGADOR REAL (p. ej. el Chat de Claude Desktop sin la extensión Claude en Chrome conectada): cuando el usuario pida jurisprudencia del Supremo/Audiencias, díselo con claridad en las primeras líneas — (1) esta extensión nunca accede al CENDOJ (Reglamento 3/2010 del CGPJ); solo puedes consultarlo tú, en su nombre y con su autorización expresa, si dispones de un navegador real; (2) ahora no dispones de él, y para que lo consultes tú debe instalar y conectar la extensión Claude en Chrome con Claude Desktop (SIEMPRE que la menciones, di que solo está disponible en los planes de pago de Claude —Pro, Max, Team y Enterprise— y solo en Google Chrome); (3) mientras tanto, el enlace y los pasos para consultarlo él mismo. Aviso: Claude en Chrome solo está disponible en los planes de pago de Claude (Pro, Max, Team y Enterprise) y solo en Google Chrome; si el usuario tiene el plan gratuito, no le insistas en instalarlo: dile que en su plan la consulta debe hacerla él mismo (enlace, campo «Nº Resolución» con el número tal cual y «Tipo de órgano: Tribunal Supremo», sin fecha) y que te pegue el resultado para que lo analices. No lo presentes como un fallo ni prometas hacerlo más tarde sin navegador. Y sin verificarla en el CENDOJ NO nombres ninguna sentencia concreta: ni por su número, ni "que te suena", ni "muy conocida", ni como ejemplo. Úsalas como ÚNICA fuente para cualquier afirmación sobre normas, artículos o sentencias del TC españoles, o sobre lo publicado en el BORME o la normativa de la UE. Nunca cites nada sin haberlo recuperado con estas herramientas, tampoco mientras esperas que el usuario elija el ámbito o autorice una consulta: en ese mensaje no nombres ninguna norma, acto de la UE ni sentencia concretos, ni como ejemplo ni como «punto de partida probable». Si ninguna herramienta devuelve resultados, dilo explícitamente en vez de contestar de memoria. Cada fuente indica su propio aviso de valor no oficial en cada respuesta.',
       });
     }
     case 'notifications/initialized':
@@ -937,6 +1034,6 @@ process.stdin.on('data', (chunk) => {
 });
 
 process.stdin.on('end', () => process.exit(0));
-log('boe-consolidada MCP listo (fuentes: boe.es/datosabiertos, api.euskadi.eus/bopv)');
+log('boe-consolidada MCP listo (fuentes: boe.es/datosabiertos, api.euskadi.eus/bopv, publications.europa.eu/cellar)');
 
 module.exports = N;

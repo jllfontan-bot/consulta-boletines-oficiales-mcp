@@ -40,10 +40,19 @@ function crc32(buf) {
 
 /* ------------------------ Fecha en formato DOS ------------------------ */
 
+// Build reproducible (desde la 1.6.1): todas las entradas llevan la misma fecha fija, no la
+// hora del build, para que los mismos fuentes den siempre el mismo .mcpb y la misma sha256
+// (la que va en server.json). Se puede fijar otra con SOURCE_DATE_EPOCH (segundos, UTC),
+// como en otras herramientas de builds reproducibles. Por defecto, 1980-01-01 00:00, la
+// primera fecha que admite el formato ZIP.
+const FECHA_FIJA = process.env.SOURCE_DATE_EPOCH
+  ? new Date(Number(process.env.SOURCE_DATE_EPOCH) * 1000)
+  : new Date(Date.UTC(1980, 0, 1, 0, 0, 0));
+
 function fechaDOS(d) {
   return {
-    hora: ((d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1)) & 0xffff,
-    fecha: (((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate()) & 0xffff,
+    hora: ((d.getUTCHours() << 11) | (d.getUTCMinutes() << 5) | (d.getUTCSeconds() >> 1)) & 0xffff,
+    fecha: (((d.getUTCFullYear() - 1980) << 9) | ((d.getUTCMonth() + 1) << 5) | d.getUTCDate()) & 0xffff,
   };
 }
 
@@ -53,7 +62,7 @@ function construirZip(entradas) {
   const locales = [];
   const central = [];
   let offset = 0;
-  const { hora, fecha } = fechaDOS(new Date());
+  const { hora, fecha } = fechaDOS(FECHA_FIJA);
 
   for (const { nombre, datos } of entradas) {
     const nombreBuf = Buffer.from(nombre, 'utf8');

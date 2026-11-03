@@ -1,17 +1,18 @@
 # Consulta Boletines Oficiales - Legislación consolidada — conector para Claude
 
-> **No es un servicio oficial.** No está vinculado a la Agencia Estatal BOE ni al Gobierno
-> Vasco: solo usa sus datos abiertos, con las condiciones de reutilización de cada uno.
+> **No es un servicio oficial.** No está vinculado a la Agencia Estatal BOE, al Gobierno
+> Vasco ni a la Unión Europea: solo usa sus datos abiertos, con las condiciones de reutilización de cada uno.
 
 Da a Claude acceso directo a la colección de legislación consolidada de la Agencia
-Estatal BOE, a las sentencias del Tribunal Constitucional publicadas en el BOE y,
-para el País Vasco, a la normativa del BOPV vía Open Data Euskadi. Ninguna otra
-fuente.
+Estatal BOE, a las sentencias del Tribunal Constitucional publicadas en el BOE, a la
+normativa del BOPV (País Vasco) vía Open Data Euskadi y, desde la 1.7.0, a la
+normativa de la Unión Europea (CELLAR, la base de EUR-Lex), en castellano o inglés.
+Ninguna otra fuente.
 
-- **Gratis**: ni la API del BOE ni la de Open Data Euskadi piden clave, cuenta ni pago.
-- **Sin límites de la fuente**: ninguna de las dos publica cuotas para su API.
-- **Sin intermediarios**: se ejecuta en tu ordenador y habla directamente con `boe.es`
-  y `api.euskadi.eus`. No pasa por ningún servicio de terceros ni por ningún servidor
+- **Gratis**: ni la API del BOE, ni la de Open Data Euskadi, ni CELLAR piden clave, cuenta ni pago.
+- **Sin límites de la fuente**: ninguna de las tres publica cuotas para su API.
+- **Sin intermediarios**: se ejecuta en tu ordenador y habla directamente con `boe.es`,
+  `api.euskadi.eus` y `publications.europa.eu`. No pasa por ningún servicio de terceros ni por ningún servidor
   mío.
 
 ---
@@ -136,6 +137,28 @@ nombres solo se cachean en memoria, nunca en disco.
 Cada resultado trae `url`, `url_pdf` (única versión oficial, RD 1979/2008) y la fecha
 de actualización del documento.
 
+**Unión Europea (CELLAR / EUR-Lex) — desde la 1.7.0**
+
+Reglamentos, directivas y decisiones de la UE desde CELLAR, el repositorio de la
+Oficina de Publicaciones de la UE en el que se basa EUR-Lex (host
+`publications.europa.eu`, solo GET, sin registro). Fuente distinta del BOE: su propia
+`fuente` y su propio `aviso` (© Unión Europea, reutilización según la Decisión
+2011/833/UE, texto consolidado bajo CC BY 4.0). Todas aceptan `idioma`: `es`
+(castellano, por defecto) o `en` (inglés); si un texto no existe en ese idioma, la
+respuesta lo dice (`IDIOMA_NO_DISPONIBLE`) y nunca sirve otro en su lugar.
+
+| Herramienta | Para qué |
+|---|---|
+| `ue_ficha_norma` | Ficha de un acto por su cita («Reglamento (UE) 2016/679», «Directiva 95/46/CE»), siglas (RGPD, DSA, Bruselas I bis…) o CELEX: título, vigor, versiones consolidadas y actos que lo modifican |
+| `ue_texto_articulo` | Texto de un artículo en la versión consolidada que rige hoy (o el original si no hay consolidada) |
+| `ue_verificar_cita` | Verifica una cita europea (también lo hacen `boe_verificar_cita` y `boe_verificar_escrito`, en castellano) |
+| `ue_buscar_normas` | Búsqueda por palabras del título en castellano (`texto_es`), en inglés (`texto_en`) o en los dos a la vez, en todos los años salvo que se acote; tipo de acto opcional |
+
+Cada resultado trae `url` (EUR-Lex) y `url_doue` (ELI del Diario Oficial de la UE, lo
+único auténtico, Reglamento (UE) n.º 216/2013). No cubre los Tratados ni la Carta de
+Derechos Fundamentales. La web de EUR-Lex no se consulta nunca (tiene cortafuegos
+anti-bots): solo se da como enlace.
+
 ### Cómo pedirlo
 
 > ¿Qué dice hoy el artículo 56 del Estatuto de los Trabajadores?
@@ -169,15 +192,15 @@ Cada respuesta trae el identificador BOE, el enlace ELI y la fecha desde la que 
 
 En resumen: cuanto más caro de pedir y más estable es el dato, más dura la caché; cuanto más puede cambiar de un día para otro, más corta. Repreguntar sobre la misma norma —esta conversación, la siguiente, o después de reiniciar Claude Desktop— no vuelve a llamar al BOE ni a Euskadi mientras la caché correspondiente siga viva. Nada de esto afecta a la vigencia real de una norma, solo a cuándo vuelve a comprobarla este conector contra la fuente. Si el disco no se puede escribir, sigue funcionando solo con la caché de memoria, sin romperse.
 
-**El texto consolidado no es oficial.** Lo dice el propio BOE: la consolidación integra las modificaciones en un solo texto para facilitar la consulta, pero para efectos jurídicos hay que ir a la publicación oficial. Lo mismo vale para el texto que reconstruye `euskadi_texto_norma` a partir de la API de Open Data Euskadi: para efectos jurídicos, el PDF/EPUB enlazado. Todas las respuestas incluyen su propio aviso.
+**El texto consolidado no es oficial.** Lo dice el propio BOE: la consolidación integra las modificaciones en un solo texto para facilitar la consulta, pero para efectos jurídicos hay que ir a la publicación oficial. Lo mismo vale para el texto que reconstruye `euskadi_texto_norma` a partir de la API de Open Data Euskadi: para efectos jurídicos, el PDF/EPUB enlazado. Y para el texto consolidado de la UE: es un instrumento de documentación sin efecto jurídico; lo auténtico es el Diario Oficial de la UE (`url_doue`). Todas las respuestas incluyen su propio aviso.
 
-**No cubre todo el derecho español.** Solo hay legislación consolidada estatal y autonómica *seleccionada* del BOE, más el BOPV del País Vasco. Fuera quedan reglamentos menores, la normativa de las otras 16 comunidades que no está en el BOE (sobre todo Órdenes y Resoluciones — ver más abajo), la normativa local y el derecho de la UE. Cuando `boe_verificar_escrito` marca una cita como `NO_RESUELTA` **no significa que sea falsa**: significa que no está en esta colección. Hay que mirarla a mano.
+**No cubre todo el derecho español.** Solo hay legislación consolidada estatal y autonómica *seleccionada* del BOE, más el BOPV del País Vasco. Fuera quedan reglamentos menores, la normativa de las otras 16 comunidades que no está en el BOE (sobre todo Órdenes y Resoluciones — ver más abajo), la normativa local y, del derecho de la UE, los Tratados y la Carta de Derechos Fundamentales. Cuando `boe_verificar_escrito` marca una cita como `NO_RESUELTA` **no significa que sea falsa**: significa que no está en esta colección. Hay que mirarla a mano.
 
 **Las Órdenes y la mayoría de Resoluciones autonómicas no están en el BOE, de ninguna comunidad — comprobado, no es una suposición.** El BOE cataloga la normativa autonómica "más relevante" (leyes, decretos), no las convocatorias anuales, exenciones o resoluciones de trámite. Para el País Vasco, `euskadi_buscar_normativa`/`euskadi_texto_norma` sí las tienen. Para el resto de comunidades, ese tipo de normativa hay que buscarlo en su boletín oficial o en la web de la consejería — no está aquí y no debería inventarse.
 
 **Jurisprudencia: solo el Tribunal Constitucional.** Este conector no toca el CENDOJ (sus condiciones de reutilización exigen autorización previa del CGPJ). Las sentencias del TC sí están disponibles, porque se publican en el propio BOE, no en el CENDOJ. Para cualquier otra sentencia (Supremo, Audiencias, Juzgados), si Claude la cita la está sacando de su memoria y puede ser inventada — no debería hacerlo.
 
-**Ante una investigación abierta, Claude pregunta el ámbito antes de buscar.** No la restringe por defecto al BOE: te pregunta si quieres BOE, también jurisprudencia (TC/CENDOJ) y/o la normativa propia de alguna comunidad autónoma en concreto. Para lo que no tiene acceso automatizado (CENDOJ, cualquier comunidad salvo el País Vasco) te da instrucciones de rellenado o el enlace directo al buscador oficial (Aragón y La Rioja admiten el enlace ya relleno con el texto buscado) — nunca como llamada automática del conector.
+**Ante una investigación abierta, Claude pregunta el ámbito antes de buscar.** No la restringe por defecto al BOE: te pregunta si quieres BOE, normativa de la Unión Europea, también jurisprudencia (TC/CENDOJ) y/o la normativa propia de alguna comunidad autónoma en concreto. Para lo que no tiene acceso automatizado (CENDOJ, cualquier comunidad salvo el País Vasco) te da instrucciones de rellenado o el enlace directo al buscador oficial (Aragón y La Rioja admiten el enlace ya relleno con el texto buscado) — nunca como llamada automática del conector.
 
 **El verificador detecta el patrón «art. N + norma».** Coge enumeraciones («arts. 9, 10 y 11 del ET»), apartados («art. 24.2 CE») y ordinales («art. 348 bis»). No detecta citas por nombre de precepto sin número ni referencias implícitas del tipo «el artículo anterior».
 
@@ -223,7 +246,7 @@ castellano) o de la **GNU Affero General Public License** publicada por la Free 
 Foundation, versión 3 (ver [`LICENSE`](LICENSE)). Identificador SPDX:
 `EUPL-1.2 OR AGPL-3.0-only`. Las versiones de la extensión hasta la 1.6.0 se distribuyeron con la licencia MIT.
 
-La extensión no lleva componentes de terceros (solo módulos nativos de Node.js). 
+La extensión no lleva componentes de terceros (solo módulos nativos de Node.js).
 
 Se distribuye con la esperanza de que sea útil, pero **SIN NINGUNA GARANTÍA**, ni siquiera la
 garantía implícita de COMERCIABILIDAD o ADECUACIÓN A UN FIN DETERMINADO. Los datos proceden de la

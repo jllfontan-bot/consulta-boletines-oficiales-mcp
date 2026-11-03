@@ -58,7 +58,7 @@ async function clienteSinApps() {
   try {
     await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'sin-apps', version: '1' } });
     const nombres = (await rpc('tools/list', {})).result.tools.map((t) => t.name);
-    ok(nombres.length === 18, `lista 18 herramientas, sin las dos internas (${nombres.length})`);
+    ok(nombres.length === 22, `lista 22 herramientas, sin las dos internas (${nombres.length})`);
     ok(!nombres.includes('cendoj_permiso_respuesta') && !nombres.includes('boe_ambito_seleccionado'), 'no lista cendoj_permiso_respuesta ni boe_ambito_seleccionado');
     ok(nombres.includes('cendoj_pedir_permiso') && nombres.includes('boe_elegir_ambito'), 'sí lista cendoj_pedir_permiso y boe_elegir_ambito (con su texto alternativo)');
     const pedido = await llamar('cendoj_pedir_permiso', { motivo: 'comprobar una sentencia' });
@@ -107,7 +107,7 @@ async function clienteSinApps() {
   const sinAnotar = tl.result.tools.filter((t) => !t.annotations || !t.annotations.title || typeof t.annotations.readOnlyHint !== 'boolean').map((t) => t.name);
   ok(sinAnotar.length === 0, `1.6.1: todas las herramientas llevan title y readOnlyHint${sinAnotar.length ? ' (faltan: ' + sinAnotar.join(', ') + ')' : ''}`);
   console.log('  herramientas:', nombres.join(', '));
-  ok(nombres.length === 20, `expone 20 herramientas (${nombres.length})`);
+  ok(nombres.length === 24, `expone 24 herramientas (${nombres.length})`);
   ok(nombres.includes('cendoj_pedir_permiso') && nombres.includes('cendoj_permiso_respuesta'), 'incluye las herramientas de permiso del CENDOJ');
   ok(nombres.includes('boe_verificar_escrito'), 'incluye el verificador de escritos');
   const borme = tl.result.tools.find((t) => t.name === 'boe_borme_buscar');
@@ -143,6 +143,15 @@ async function clienteSinApps() {
       datosSeleccion.ambito_elegido_por_el_usuario.some((s) => s.includes('Cataluña')),
     'boe_ambito_seleccionado traduce la selección del formulario a texto legible'
   );
+  // 1.7.0 (prueba real del 03/11/2026): el formulario no ofrecía la UE y Claude, mientras
+  // esperaba, adelantó reglamentos de memoria.
+  ok(html.includes('name="ue"') && /ue: ue/.test(html), '1.7.0: el formulario ofrece «Unión Europea» y la envía');
+  const seleccionUE = JSON.parse((await pedir('tools/call', { name: 'boe_ambito_seleccionado', arguments: { ue: true } })).result.content[0].text);
+  ok(seleccionUE.ambito_elegido_por_el_usuario.some((s) => /Unión Europea/.test(s) && /ue_\*/.test(s)), '1.7.0: la UE elegida se traduce a las herramientas ue_*');
+  const textoAlt = JSON.parse(elegir.result.content[0].text).texto_alternativo_si_no_hay_formulario;
+  const descElegir = tl.result.tools.find((t) => t.name === 'boe_elegir_ambito').description;
+  ok(/Unión Europea/.test(textoAlt) && /Unión Europea/.test(descElegir), '1.7.0: el texto alternativo y la descripción mencionan la UE');
+  ok([textoAlt, descElegir, init.result.instructions].every((t) => /punto de partida probable/.test(t)), '1.7.0: mientras espera el ámbito, no nombra normas (texto alternativo, descripción e instrucciones)');
 
   console.log('\n3c) Ventana de permiso del CENDOJ (MCP Apps)');
   const recursoCendoj = listaRecursos.result.resources.find((r) => r.uri === 'ui://boe-consolidada/cendoj-permiso.html');

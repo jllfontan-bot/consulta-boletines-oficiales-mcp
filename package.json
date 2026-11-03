@@ -4,10 +4,12 @@
   "description": "Servidor MCP para la legislacion consolidada del BOE. Sin dependencias.",
   "main": "server/index.js",
   "scripts": {
-    "test": "node test/unit.js && node test/borme.js && node test/protocolo.js",
+    "test": "node test/unit.js && node test/borme.js && node test/ue.js && node test/instrucciones.js && node test/protocolo.js && node test/build.js",
+    "test:ue": "node test/ue.js",
     "test:unit": "node test/unit.js",
     "test:protocolo": "node test/protocolo.js",
     "test:borme": "node test/borme.js",
+    "test:build": "node test/build.js",
     "test:vivo": "node test/vivo.js",
     "build": "node build.mjs",
     "start": "node server/index.js"

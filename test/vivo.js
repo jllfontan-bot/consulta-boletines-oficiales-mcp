@@ -295,6 +295,47 @@ async function llamar(name, args) {
   const bormeNoExiste = await rpc('tools/call', { name: 'boe_borme_texto', arguments: { id: 'BORME-C-2099-1' } });
   ok(bormeNoExiste.result.isError === true && /no existe en el BORME/.test(JSON.parse(bormeNoExiste.result.content[0].text).error || ''), 'un id inexistente (la API da 200 con <error>) es un error explícito, no un texto vacío');
 
+  console.log('\n── UE. Normativa europea (CELLAR, castellano e inglés) ──');
+  const ueFicha = await llamar('ue_ficha_norma', { norma: 'Reglamento (UE) n.º 1215/2012' });
+  ok(ueFicha.estado === 'OK' && ueFicha.celex === '32012R1215' && /competencia judicial/.test(ueFicha.titulo || ''), 'ficha de Bruselas I bis en castellano');
+  ok(ueFicha.version_consolidada_vigente && /^02012R1215-/.test(ueFicha.version_consolidada_vigente.celex) && ueFicha.modificada_por.includes('32015R0281'), 'con su versión consolidada vigente y los actos que lo modifican');
+  ok(ueFicha.fuente !== 'BOE · legislación consolidada' && /2011\/833\/UE/.test(ueFicha.aviso || ''), 'fuente y aviso propios de la UE');
+  const rgpdEs = await llamar('ue_texto_articulo', { norma: 'RGPD', articulo: '17' });
+  ok(rgpdEs.estado === 'OK' && /supresión/i.test(rgpdEs.articulo_titulo || '') && /^1\. El interesado/.test(rgpdEs.texto || ''), 'art. 17 RGPD en castellano');
+  ok(/^\d{2}\/\d{2}\/\d{4}$/.test(rgpdEs.version_desde || '') && /data\.europa\.eu\/eli\/reg\/2016\/679\/oj\/spa$/.test(rgpdEs.url_doue || ''), 'con version_desde y enlace al DOUE');
+  const rgpdEn = await llamar('ue_texto_articulo', { norma: 'GDPR', articulo: '17', idioma: 'en' });
+  ok(rgpdEn.estado === 'OK' && /erasure/i.test(rgpdEn.articulo_titulo || '') && /data subject/.test(rgpdEn.texto || '') && rgpdEn.articulo === 'Article 17', 'el mismo artículo en inglés, del documento inglés');
+  const iaBis = await llamar('ue_texto_articulo', { norma: 'Reglamento (UE) 2024/1689', articulo: '5' });
+  ok(iaBis.estado === 'OK' && /prohibidas/i.test(iaBis.articulo_titulo || ''), 'Reglamento de IA consolidado: art. 5');
+  const d9546 = await llamar('ue_texto_articulo', { norma: 'Directiva 95/46/CE', articulo: '2' });
+  ok(d9546.estado === 'NORMA_NO_VIGENTE' && d9546.articulo_titulo === 'Definiciones' && /datos personales/.test(d9546.texto || ''), 'directiva derogada (HTML antiguo): NORMA_NO_VIGENTE con su último texto');
+  const ueNo = await llamar('ue_verificar_cita', { norma: 'RGPD', articulo: '200' });
+  ok(ueNo.estado === 'ARTICULO_NO_ENCONTRADO', 'artículo inexistente del RGPD');
+  const ueBusca = await llamar('ue_buscar_normas', { tipo: 'reglamento', texto_es: 'inteligencia artificial', anio_desde: 2024 });
+  ok(ueBusca.normas.some((n) => n.celex === '32024R1689'), 'búsqueda por título en castellano encuentra el Reglamento de IA');
+  const ueBuscaEn = await llamar('ue_buscar_normas', { tipo: 'directiva', texto_en: 'consumer credit', idioma: 'en' });
+  ok(ueBuscaEn.normas.some((n) => n.celex === '31987L0102') && /Directive/.test(ueBuscaEn.normas[0].titulo || ''), 'en inglés, sin años, con títulos en inglés');
+  const ueBilingue = await llamar('ue_buscar_normas', { tipo: 'directiva', texto_es: 'crédito consumo', texto_en: 'consum* credit' });
+  const celexBil = ueBilingue.normas.map((n) => n.celex);
+  ok(['32023L2225', '32008L0048', '32014L0017', '31987L0102'].every((c) => celexBil.includes(c)), `castellano e inglés a la vez, en todos los años: ${celexBil.join(', ')}`);
+  ok(ueBilingue.normas.find((n) => n.celex === '32014L0017').encontrada_por.join() === 'inglés' && /Directiva/.test(ueBilingue.normas[0].titulo || ''), 'la 2014/17 solo aparece por el inglés, y los títulos salen en castellano');
+  const ueDivorcio = await llamar('ue_buscar_normas', { texto_es: 'divorcio', texto_en: 'divorce' });
+  ok(ueDivorcio.normas.some((n) => n.celex === '32010R1259') && ueDivorcio.anios === 'todos', 'sin tipo ni años: «divorcio»/«divorce» encuentra Roma III');
+  const ueMatrimonial = await llamar('ue_buscar_normas', { tipo: 'reglamento', texto_es: 'matrimonial', texto_en: 'matrimonial' });
+  const b2bis = ueMatrimonial.normas.find((n) => n.celex === '32003R2201');
+  const b2ter = ueMatrimonial.normas.find((n) => n.celex === '32019R1111');
+  ok(b2bis && b2bis.conocido_como.includes('Bruselas II bis') && b2ter && b2ter.conocido_como.includes('Bruselas II ter'), 'la búsqueda trae los nombres usuales (conocido_como) de Bruselas II bis y II ter');
+  ok(b2bis && b2bis.en_vigor === false && /^\d{2}\/\d{2}\/20\d{2}$/.test(b2bis.fin_de_vigencia || ''), `Bruselas II bis sale como no vigente y con su fin_de_vigencia (${b2bis && b2bis.fin_de_vigencia})`);
+  const ueEscrito = await llamar('boe_verificar_escrito', { texto: 'Conforme al art. 6 del Reglamento (UE) 2016/679 y al art. 24 de la Constitución.' });
+  const fuentesEscrito = ueEscrito.detalle.map((d) => d.fuente);
+  ok(fuentesEscrito.includes('Oficina de Publicaciones de la UE · CELLAR (EUR-Lex)') && fuentesEscrito.includes('BOE · legislación consolidada'), 'un escrito con citas europeas y españolas: cada una contra su fuente');
+  ok(ueEscrito.detalle.every((d) => d.estado === 'OK' || d.estado === 'NORMA_VIGENTE'), 'y todas verificadas');
+  for (const a of require('../server/nucleo.js').ATAJOS_UE) {
+    const f = await llamar('ue_ficha_norma', { norma: a.celex });
+    const esperado = a.vigente === false ? 'NORMA_NO_VIGENTE' : 'OK';
+    ok(f.estado === esperado && a.clave.test(f.titulo || ''), `atajo UE ${a.siglas[0]} -> ${a.celex} (${f.estado}): ${String(f.titulo).slice(0, 70)}…`);
+  }
+
   console.log(`\n${'═'.repeat(60)}`);
   console.log(fallos === 0 ? `TODO CORRECTO${avisos ? ` (con ${avisos} aviso[s] a revisar)` : ''}` : `${fallos} FALLO(S)`);
   console.log('Revisa arriba, uno a uno, que cada título oficial corresponde a sus siglas.');
