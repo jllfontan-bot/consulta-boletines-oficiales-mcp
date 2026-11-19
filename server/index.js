@@ -180,7 +180,7 @@ function textoAmbitoFallback() {
 /* pregunta en texto. Ninguna vía sustituye a la respuesta explícita.    */
 /* ------------------------------------------------------------------ */
 
-const VERSION = '1.7.0'; // debe coincidir con manifest.json (lo comprueba test/protocolo.js)
+const VERSION = '1.7.1'; // debe coincidir con manifest.json (lo comprueba test/protocolo.js)
 
 const RESOURCE_CENDOJ_URI = 'ui://boe-consolidada/cendoj-permiso.html';
 

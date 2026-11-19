@@ -268,6 +268,35 @@ console.log('\n8e) Conectores "y por la", "y a la", "y en la" sin coma (14/10/20
   mantiene('Orden 1/2099, por la que se crea un fichero y por la que se deroga');
 }
 
+console.log('\n8b) Elección por número oficial: rango específico y título (B12, 19/11/2026)');
+{
+  // Datos reales devueltos por la API el 19/11/2026 (orden: fecha desc).
+  const c318 = [
+    { id: 'BOE-A-2019-3997', rango: 'Ley', titulo: 'Ley 3/2018, de 26 de diciembre, de medidas fiscales y administrativas.' },
+    { id: 'BOE-A-2018-16673', rango: 'Ley Orgánica', titulo: 'Ley Orgánica 3/2018, de 5 de diciembre, de Protección de Datos Personales y garantía de los derechos digitales.' },
+    { id: 'BOE-A-2018-15141', rango: 'Ley', titulo: 'Ley 3/2018, de 9 de octubre, de creación del colegio Profesional de Logopedas.' },
+  ];
+  const e1 = m.elegirPorNumeroOficial('Ley Orgánica 3/2018', c318);
+  ok(e1.elegido.id === 'BOE-A-2018-16673' && !e1.alternativas.length, '"Ley Orgánica 3/2018" gana a las "Ley 3/2018" (antes: la más reciente, autonómica)');
+  const c961 = [
+    { id: 'BOE-A-1996-19263', rango: 'Ley', titulo: 'Ley 1/1996, de 27 de junio, de Cámaras Agrarias de Castilla-La Mancha.' },
+    { id: 'BOE-A-1996-8930', rango: 'Real Decreto Legislativo', titulo: 'Real Decreto Legislativo 1/1996, de 12 de abril, por el que se aprueba el texto refundido de la Ley de Propiedad Intelectual.' },
+    { id: 'BOE-A-1996-1069', rango: 'Ley Orgánica', titulo: 'Ley Orgánica 1/1996, de 15 de enero, de Protección Jurídica del Menor.' },
+  ];
+  ok(m.elegirPorNumeroOficial('Ley Orgánica 1/1996 de Protección Jurídica del Menor', c961).elegido.id === 'BOE-A-1996-1069', '"Ley Orgánica 1/1996" elige la LO aunque no sea la más reciente');
+  const c072 = [
+    { id: 'BOE-A-2011-16752', rango: 'Ley', titulo: 'Ley 9/2007, de 29 de junio, de creación de Kontsumobide-Instituto Vasco de Consumo.' },
+    { id: 'BOE-A-2007-19819', rango: 'Ley', titulo: 'Ley 9/2007, de 22 de octubre, de la Administración de la Junta de Andalucía.' },
+    { id: 'BOE-A-2007-13828', rango: 'Ley', titulo: 'Ley 9/2007, de 13 de junio, de subvenciones de Galicia.' },
+    { id: 'BOE-A-2007-12200', rango: 'Instrucción', titulo: 'Instrucción 9/2007, de 19 de junio, de la Junta Electoral Central.' },
+  ];
+  const e3 = m.elegirPorNumeroOficial('Ley 9/2007 de subvenciones de Galicia', c072);
+  ok(e3.elegido.id === 'BOE-A-2007-13828' && !e3.alternativas.length, 'el título pedido desempata ("subvenciones de Galicia")');
+  const e4 = m.elegirPorNumeroOficial('Ley 9/2007', c072);
+  ok(e4.elegido.id === 'BOE-A-2011-16752' && e4.alternativas.length === 2, 'sin más señal: la más reciente PERO declara 2 alternativas (no finge certeza)');
+  ok(m.elegirPorNumeroOficial('9/2007', c072).elegido.id === 'BOE-A-2011-16752', 'sin rango en el texto: no revienta y devuelve la más reciente');
+}
+
 console.log('\n9) Euskadi: no confundir un ministerio estatal con el Gobierno Vasco');
 (async () => {
   // B4 (revisión 21/09/2026): "Orden ... del Ministerio de Trabajo e

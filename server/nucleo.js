@@ -760,6 +760,37 @@ const _TIPOS_NORMA_GENERICOS = new Set([
 // escrito que una cita real, y no vale la pena el riesgo.
 const _PISTA_TIPO_NORMA_RE = /\b(ley|decreto|reglamento|orden|circular|resoluci[oó]n|instrucci[oó]n|c[oó]digo|estatuto|convenio|constituci[oó]n|directiva|carta\s+magna)\b/i;
 
+/**
+ * Elige, entre las normas que comparten un número oficial ("3/2018"), la que
+ * pide el texto del usuario. Función pura (sin red), probada en test/unit.js.
+ *
+ * B3: por defecto la búsqueda ordena por fecha de publicación descendente y
+ * antes se cogía la primera -- la más reciente, sin mirar su RANGO ni su título.
+ * B12 (19/11/2026): el filtro por rango usaba "el nombre CONTIENE el rango", y
+ * "Ley" está contenido en "Ley Orgánica 3/2018": pasaban las dos y ganaba la
+ * ley autonómica más reciente. Ahora, entre las que encajan por rango, se queda
+ * el rango MÁS ESPECÍFICO (el más largo), y después se desempata por el
+ * solapamiento de palabras entre el nombre pedido y el título ("Ley 9/2007 de
+ * subvenciones de Galicia" -> la que dice "subvenciones de Galicia").
+ *
+ * @param {string} nombre texto del usuario
+ * @param {Array<{id:string,titulo:string,rango:string}>} candidatos orden por fecha desc
+ * @returns {{elegido: object, alternativas: object[]}} alternativas = empatadas con el elegido
+ */
+function elegirPorNumeroOficial(nombre, candidatos) {
+  const nombreNorm = norm(nombre);
+  let pool = candidatos;
+  const porRango = candidatos.filter((x) => x.rango && nombreNorm.includes(norm(x.rango)));
+  if (porRango.length) {
+    const maxLen = Math.max(...porRango.map((x) => norm(x.rango).length));
+    pool = porRango.filter((x) => norm(x.rango).length === maxLen);
+  }
+  const puntos = pool.map((x) => solapamientoPalabras(nombre, x.titulo || ''));
+  const mejor = Math.max(...puntos);
+  const empatadas = pool.filter((_, i) => puntos[i] === mejor);
+  return { elegido: empatadas[0], alternativas: empatadas.slice(1) };
+}
+
 async function resolverNorma(nombre) {
   // B2: si el propio nombre ya trae un número oficial explícito ("Ley 42/2015,
   // de reforma de la Ley de Enjuiciamiento Civil"), esa es la referencia
@@ -770,20 +801,24 @@ async function resolverNorma(nombre) {
   // otra norma distinta (la que reforma, no la reformada).
   const numero = String(nombre).match(/(\d+\/\d{4})/);
   if (numero) {
-    const r = await buscarNormas({ numero_oficial: numero[1], limite: 5 });
+    // B12 (19/11/2026): el límite era 5 y dejaba fuera la norma buscada cuando
+    // el mismo número lo comparten varias (la Ley Orgánica 1/1996 era la 8.ª de
+    // 9 resultados). Se pide el máximo que admite la API (50).
+    const r = await buscarNormas({ numero_oficial: numero[1], limite: 50 });
     if (r.length) {
-      // B3: por defecto la búsqueda ordena por fecha de publicación
-      // descendente y aquí siempre se cogía la primera -- la más reciente,
-      // sin mirar si su RANGO (Ley, Decreto Legislativo...) o su ámbito
-      // coinciden con lo que pide el texto. "Ley 2/2023" acababa resolviendo
-      // como un "Decreto Legislativo 2/2023" autonómico con el mismo número.
-      // Si el propio nombre menciona un rango, se prefiere el resultado cuyo
-      // rango coincide; si no hay ninguno así, se mantiene el comportamiento
-      // anterior (el más reciente) porque no hay más señal para desempatar.
-      const nombreNorm = norm(nombre);
-      const porRango = r.filter((x) => x.rango && nombreNorm.includes(norm(x.rango)));
-      const elegido = porRango.length ? porRango[0] : r[0];
-      return { ...(await fichaNorma(elegido.id)), origen: `búsqueda por número oficial ${numero[1]}` };
+      const { elegido, alternativas } = elegirPorNumeroOficial(nombre, r);
+      const ficha = await fichaNorma(elegido.id);
+      const res = { ...ficha, origen: `búsqueda por número oficial ${numero[1]}` };
+      // Regla 4: si tras rango y título siguen empatadas varias normas, no se
+      // finge certeza -- se dice y se listan las demás.
+      if (alternativas.length) {
+        res.ambigua = true;
+        res.alternativas = alternativas.map((x) => ({ id: x.id, titulo: x.titulo, rango: x.rango, fecha_publicacion: x.fecha_publicacion }));
+        res.aviso_ambiguedad =
+          `Hay ${alternativas.length + 1} normas con el número oficial ${numero[1]} que encajan igual con lo pedido; se devuelve la más reciente. ` +
+          'Añade el rango completo, el título o la comunidad autónoma para fijar cuál es.';
+      }
+      return res;
     }
   }
   const atajo = buscarAtajo(nombre);
@@ -2628,7 +2663,7 @@ module.exports = {
   log, norm, hoyISO, fmtFecha, decodeEntities, xmlATexto, extraerVersiones, extraerBloques, versionVigente,
   resolverRedireccion, fechaCalendarioValida, transporteHttps,
   // atajos y BOE consolidada
-  ATAJOS, COMUNIDADES_AUTONOMAS, buscarAtajo, buscarNormas, fichaNorma, indiceNorma, textoBloque, analisisNorma, localizarBloque, resolverNorma,
+  ATAJOS, COMUNIDADES_AUTONOMAS, buscarAtajo, buscarNormas, fichaNorma, indiceNorma, textoBloque, analisisNorma, localizarBloque, resolverNorma, elegirPorNumeroOficial,
   // Euskadi
   AVISO, AVISO_EUSKADI, buscarNormativaEuskadi, textoNormativaEuskadi, resolverNormaEuskadi, verificarCitaEuskadi,
   // Tribunal Constitucional
