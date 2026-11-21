@@ -26,6 +26,7 @@
 'use strict';
 
 const N = require('./nucleo.js');
+const ACT = require('./actualizacion.js');
 const {
   log, norm, hoyISO, ATAJOS, AVISO, AVISO_EUSKADI, AVISO_TC, AVISO_BORME, FUENTE_BORME, TIPO_BORME, AVISO_UE, FUENTE_UE,
   buscarNormasUE, fichaNormaUE, textoArticuloUE, verificarCitaUE,
@@ -154,16 +155,25 @@ const HTML_AMBITO = `<!DOCTYPE html>
 const REGLA_ESPERA_AMBITO =
   'Mientras esperas la respuesta, no nombres ninguna norma, acto de la UE ni sentencia concretos (ni como ejemplo, ni como «punto de partida probable», ni para anticipar qué vas a buscar): limítate a pedir el ámbito.';
 
-function textoAmbitoFallback() {
+// 1.7.2 (fase 5a): prueba real del 21/11/2026 -- Claude Desktop pidió el recurso del formulario con
+// un `.mcpb` local, pero el usuario no vio nada. El servidor no puede saber si el cliente lo dibuja:
+// el texto dice «se ofrece» (nunca «se ha mostrado») y manda preguntar SIEMPRE también por texto.
+const PREGUNTA_AMBITO =
+  '"¿Dónde quieres que busque? BOE (legislación estatal y autonómica), normativa de la Unión Europea, ' +
+  'también jurisprudencia del Tribunal Constitucional o del resto de tribunales (CENDOJ), y/o normativa ' +
+  'propia de alguna comunidad autónoma en concreto — dime cuál(es)."';
+
+function textoAmbitoFallback(conFormulario = true) {
+  const pregunta =
+    'Pregunta SIEMPRE también por texto, en un mensaje corto y literal: ' + PREGUNTA_AMBITO + ' y espera la respuesta antes de buscar nada. ';
+  if (!conFormulario) {
+    return 'Este cliente no admite formularios: NO se ha mostrado ninguno al usuario. ' + pregunta + REGLA_ESPERA_AMBITO;
+  }
   return (
-    'Se ha mostrado al usuario un formulario para elegir el ámbito de búsqueda ' +
-    '(BOE, Tribunal Constitucional, Unión Europea, CENDOJ, comunidad autónoma). Si tu ' +
-    'cliente no admite formularios interactivos y no ves confirmación de una selección, ' +
-    'pregunta tú mismo, textualmente: "¿Dónde quieres que busque? BOE (legislación ' +
-    'estatal y autonómica), normativa de la Unión Europea, también jurisprudencia del ' +
-    'Tribunal Constitucional o del resto de tribunales (CENDOJ), y/o normativa propia de ' +
-    'alguna comunidad autónoma en concreto — dime cuál(es)." y espera la respuesta antes ' +
-    'de buscar nada. ' + REGLA_ESPERA_AMBITO
+    'Se ha ofrecido al usuario un formulario para elegir el ámbito de búsqueda (BOE, Tribunal Constitucional, ' +
+    'Unión Europea, CENDOJ, comunidad autónoma), pero puede que su cliente no lo muestre (en Claude Desktop con ' +
+    'una extensión local a veces no se ve), y desde aquí no se puede saber. ' + pregunta +
+    'Vale la que llegue primero: el formulario (vía boe_ambito_seleccionado) o su respuesta escrita. ' + REGLA_ESPERA_AMBITO
   );
 }
 
@@ -180,7 +190,7 @@ function textoAmbitoFallback() {
 /* pregunta en texto. Ninguna vía sustituye a la respuesta explícita.    */
 /* ------------------------------------------------------------------ */
 
-const VERSION = '1.7.1'; // debe coincidir con manifest.json (lo comprueba test/protocolo.js)
+const VERSION = '1.7.2'; // debe coincidir con manifest.json (lo comprueba test/protocolo.js)
 
 const RESOURCE_CENDOJ_URI = 'ui://boe-consolidada/cendoj-permiso.html';
 
@@ -207,7 +217,7 @@ const HTML_CENDOJ = `<!DOCTYPE html>
   <h2>&#9888;&#65039; ¿Autorizas que Claude consulte el CENDOJ?</h2>
   <p>Claude quiere abrir el buscador de jurisprudencia del CENDOJ (poderjudicial.es) con su navegador y hacer la consulta en tu nombre, para tu uso particular.</p>
   <div class="caja" id="cajamotivo" style="display:none">Consulta prevista: <span id="motivo"></span></div>
-  <p class="peque">Es una consulta particular y puntual, no una descarga sistemática ni una reutilización de la base de datos (Reglamento 3/2010 del CGPJ); Claude solo hará las consultas necesarias para lo que le pides. Este conector no accede al CENDOJ por sí mismo. La autorización vale solo para esta tarea de investigación; si después hace falta otra, te lo volverá a pedir.</p>
+  <p class="peque">Es una consulta particular y puntual, no una descarga sistemática ni una reutilización de la base de datos (Reglamento 3/2010 del CGPJ); Claude solo hará las consultas necesarias para lo que le pides. Este conector no accede al CENDOJ por sí mismo. La autorización vale hasta que cierres Claude Desktop: mientras tanto Claude no te la volverá a pedir en cada consulta, pero seguirá limitándose a consultas puntuales para lo que le pidas, y antes de descargar el PDF de alguna sentencia para leerlo te enseñará cuáles y te pedirá permiso.</p>
   <div class="botones">
     <button id="si" type="button">Autorizar la consulta al CENDOJ</button>
     <button id="no" type="button">No autorizar</button>
@@ -228,6 +238,21 @@ const HTML_CENDOJ = `<!DOCTYPE html>
     if (data.method === 'ui/notifications/tool-input' && data.params && data.params.arguments && data.params.arguments.motivo) {
       document.getElementById('motivo').textContent = String(data.params.arguments.motivo).slice(0, 400);
       document.getElementById('cajamotivo').style.display = 'block';
+    }
+    // 1.7.2: si el permiso ya estaba concedido, el servidor lo dice en el resultado y la ventana no pide nada.
+    if (data.method === 'ui/notifications/tool-result' && data.params) {
+      var ya = false;
+      try {
+        var sc = data.params.structuredContent;
+        var c = data.params.content && data.params.content[0] && data.params.content[0].text;
+        var r = sc || (c ? JSON.parse(c) : null);
+        ya = !!(r && typeof r.permiso_cendoj === 'string' && r.permiso_cendoj.indexOf('YA AUTORIZADO') === 0);
+      } catch (e) {}
+      if (ya) {
+        document.querySelector('h2').textContent = 'Consulta al CENDOJ ya autorizada';
+        document.querySelector('.botones').style.display = 'none';
+        document.getElementById('estado').textContent = 'Ya lo autorizaste en esta sesión de Claude Desktop; no hace falta volver a hacerlo. Vale hasta que cierres la aplicación.';
+      }
     }
   });
   function enviarPeticion(method, params) {
@@ -255,7 +280,7 @@ const HTML_CENDOJ = `<!DOCTYPE html>
     var estado = document.getElementById('estado');
     estado.textContent = 'Enviando...';
     var texto = autorizado
-      ? 'Autorizo que consultes el CENDOJ con tu navegador para esta tarea.'
+      ? 'Autorizo que consultes el CENDOJ con tu navegador, con consultas puntuales, hasta que cierre Claude Desktop.'
       : 'No autorizo la consulta al CENDOJ. No lo abras: dame el enlace y las instrucciones para hacerlo yo.';
     var registro = enviarPeticion('tools/call', { name: 'cendoj_permiso_respuesta', arguments: { autorizado: autorizado } })
       .catch(function () {});
@@ -276,25 +301,137 @@ const HTML_CENDOJ = `<!DOCTYPE html>
 </body>
 </html>`;
 
+// 1.7.2: límites legales de la consulta al CENDOJ (aviso legal y Reglamento 3/2010 del CGPJ),
+// que siguen valiendo aunque el permiso ya no se pida en cada consulta.
+// 1.7.2 (fase 4b, decisión del usuario 21/11/2026): leer una sentencia exige descargar su PDF
+// (el visor del CENDOJ no deja extraer el texto). El aviso legal permite consultar «para uso
+// particular» y prohíbe la «descarga masiva»: se permite descargar el PDF de sentencias concretas
+// con un «sí» expreso del usuario al lote, sin conservarlas. Prueba real del 21/11/2026 (1.7.2):
+// Claude no pudo descargar (visor embebido, clic bloqueado, URL en blanco) y no dio los enlaces hasta
+// que se los pidieron; con los enlaces openDocument del buscador, el usuario los bajó a Descargas,
+// Claude pidió acceso a esa carpeta y los leyó. Por eso: enlace directo junto a cada sentencia del lote.
+// Segunda prueba (893619f): seguía intentando descargar antes de dar los enlaces, y una fila enlazaba a
+// indexAN.jsp. Ahora el flujo por defecto es que descargue el usuario; Claude solo lo intenta si se lo pide.
+// Tercera prueba (0439f66): Claude intentó leer Descargas sin pedir acceso, se denegó sin preguntar al
+// usuario y solo lo pidió cuando el usuario dijo «te doy acceso». Ahora avisa en el lote y lo pide explícitamente.
+// Cuarta prueba (4e3e7db): lo pidió al volver el usuario del navegador y se denegó sin cuadro. Hipótesis SIN
+// comprobar: Desktop solo enseña el cuadro con la ventana enfocada. Ahora lo pide en el turno del «sí» al lote.
+// Quinta prueba (21/11, mediodía): pedir acceso a una carpeta a mitad del chat falló 3 de 4 veces (Desktop
+// lo deniega sin enseñar cuadro); con Descargas conectada al chat desde el principio, Claude leyó entera una
+// sentencia de 39 páginas. Por eso: nada de pedir acceso a mitad del chat, y un recuadro fijo (no hay botones
+// reales: las ventanas MCP Apps no se ven en Desktop) con el paso 0 «añade Descargas» solo si no está conectada.
+// Sexta prueba (fase 4 cerrada, 21/11 tarde): Claude copió el paso 0 con su condición «(solo si…)» y no
+// avisó de que Descargas no estaba conectada. Ahora hay dos variantes y Claude usa solo la que toca.
+const LINEAS_LOTE_CENDOJ = [
+  '> **📄 Sentencias que propongo leer — te toca a ti**',
+  '> 1. ROJ … · ECLI … — órgano — [enlace directo](dirección openDocument del CENDOJ)',
+  '> 2. …',
+  '>',
+  '> **Qué hacer:**',
+];
+const PASOS_LOTE_CENDOJ = [
+  '> 1. Abre cada enlace.',
+  '> 2. Pulsa el icono de descarga (arriba a la derecha del visor); se guarda en Descargas.',
+  '> 3. Cuando estén todas, escríbeme «ya están».',
+  '>',
+  '> **Puedes responderme:** «ya están» → las leo · «quita la 2» / «añade X» → cambio el lote · «no» → no leo ninguna.',
+];
+// Variante A: Descargas YA conectada a este chat (sin paso 0).
+const PLANTILLA_LOTE_CON_DESCARGAS = [...LINEAS_LOTE_CENDOJ, ...PASOS_LOTE_CENDOJ].join('\n');
+// Variante B: Descargas NO conectada (o no se puede comprobar): aviso al empezar y paso 0 sin condición.
+const PLANTILLA_LOTE_SIN_DESCARGAS = [
+  LINEAS_LOTE_CENDOJ[0],
+  '> ⚠️ **Descargas no está conectada a este chat** (si lo prefieres, adjúntame los PDF en la conversación).',
+  ...LINEAS_LOTE_CENDOJ.slice(1),
+  '> 0. Añade la carpeta Descargas a este chat: botón «+» de la caja de mensaje → «Añadir carpeta» → Descargas.',
+  ...PASOS_LOTE_CENDOJ,
+].join('\n');
+const PLANTILLAS_LOTE_CENDOJ =
+  'ANTES de proponer el lote, comprueba si la carpeta Descargas está entre las carpetas conectadas a este chat y usa SOLO la variante que toque ' +
+  '(nunca las dos, y nunca copies la condición):\n' +
+  'VARIANTE A — Descargas conectada (sin paso 0):\n' + PLANTILLA_LOTE_CON_DESCARGAS + '\n' +
+  'VARIANTE B — Descargas NO conectada, o no puedes comprobarlo (aviso al empezar y paso 0):\n' + PLANTILLA_LOTE_SIN_DESCARGAS;
+
+// Matices de la sexta prueba.
+const MATICES_LECTURA_CENDOJ =
+  'Si resumes sentencias (p. ej. del TC) que solo ves citadas o reproducidas dentro de otra resolución, no digas «ya las revisé»: ' +
+  'di qué has leído entero de verdad y qué solo ves reproducido en otra resolución.';
+const REGLA_ALCANCE_JURISPRUDENCIA =
+  'ALCANCE: ante «la última jurisprudencia sobre X» que el usuario no restringe al TC, no barras por tu cuenta el BOE ni el TC desde años atrás: ' +
+  'consulta el TC solo si el usuario lo pide o el ámbito elegido lo incluye.';
+
+const DESCARGA_PDF_CENDOJ =
+  'PDF DE SENTENCIAS CONCRETAS: leerlas es lícito (uso particular, no descarga masiva) solo con el «sí» expreso del usuario a un LOTE de unas pocas, nunca barridos. ' +
+  'NO intentes descargar tú el PDF (en las pruebas reales nunca se ha podido: el visor va en un marco embebido, el clic de descarga se bloquea y la dirección directa abre en blanco); ' +
+  'solo puedes intentarlo si el usuario te lo pide expresamente. ' +
+  'Antes de proponer un lote, abre cada resultado candidato en el propio CENDOJ y toma su ENLACE DIRECTO al documento tal como lo da el buscador (la dirección openDocument): ' +
+  'no propongas para lectura ninguna sentencia de la que no tengas ya ese enlace, y nunca lo construyas ni lo des de memoria. ' +
+  'Propón SIEMPRE el lote con este RECUADRO (varias sentencias = varias líneas numeradas en el MISMO recuadro, y el usuario contesta una sola vez). ' +
+  PLANTILLAS_LOTE_CENDOJ + '\n' +
+  'El «ya están» (o «ya la descargué, léela») del usuario es su «sí» expreso al lote, porque la descarga la ha hecho él (el permiso de consulta no basta para leerlas). ' +
+  'NO pidas acceso a carpetas a mitad del chat (en las pruebas reales Claude Desktop lo denegó sin enseñar ningún cuadro): lo fiable es que Descargas esté conectada al chat, ' +
+  'y si no lo está, la variante B del recuadro. No digas que abrir un enlace da acceso a la carpeta, ni prometas que el acceso se conserve. ' +
+  'Si el usuario no quiere conectar Descargas, que te adjunte el PDF en la conversación. Nunca intentes leer una carpeta que no esté conectada. ' +
+  'Con «ya están», lee solo las del lote (aunque haya otros archivos en la carpeta), cita solo lo que hayas leído y no las conserves ni redistribuyas. Otra sentencia fuera del lote = otro recuadro. ' +
+  'NUNCA presentes como enlace a una sentencia el del buscador (indexAN.jsp abre el buscador, no la sentencia): si no tienes su enlace directo, no pongas enlace ' +
+  'y di que se busca por su ECLI en https://www.poderjudicial.es/search/indexAN.jsp. No prometas que el enlace directo sea permanente: si no abre, lo mismo, buscar por ECLI. ' +
+  'Al terminar, recuérdale que los PDF siguen en su carpeta de Descargas y que borrarlos es cosa suya (el aviso legal no permite conservarlos ni redistribuirlos). ' +
+  'Nunca resumas una sentencia que no hayas podido leer. ' + MATICES_LECTURA_CENDOJ;
+
+// 1.7.2 (quinta prueba): en un chat, ante «busca lo más reciente sobre X», Claude buscó en la web y listó
+// resoluciones de prensa antes de pedir el ámbito y el permiso del CENDOJ.
+const REGLA_WEB_JURISPRUDENCIA =
+  'REGLA WEB: ante CUALQUIER petición de jurisprudencia (también «busca lo más reciente sobre X»), lo PRIMERO es el ámbito (boe_elegir_ambito) y, para Supremo/Audiencias, ' +
+  'el permiso del CENDOJ; está PROHIBIDO buscar en la web general, abrir noticias, blogs o resúmenes, o nombrar resoluciones, números, fechas o doctrina antes de verificarlos ' +
+  'en el CENDOJ (o, las del TC, con boe_tc_*), ni como «adelanto» ni con el aviso de «sin verificar».';
+
+const LIMITES_CENDOJ =
+  'LÍMITES (aviso legal y Reglamento 3/2010 del CGPJ): solo las consultas puntuales necesarias para lo que el usuario ha pedido, con una pausa entre ellas; ' +
+  'NUNCA descargas masivas o en bloque, ni recorrer listados completos, ni conservar o redistribuir resoluciones, ni uso comercial. ' +
+  DESCARGA_PDF_CENDOJ + ' ' +
+  'Consultar «al detalle» significa revisar a fondo lo que el usuario pidió (la sentencia o las pocas que su petición necesita), nunca hacer barridos. ' +
+  'Usa siempre https://www.poderjudicial.es/search/indexAN.jsp (NUNCA index.jsp, que solo cubre el Tribunal Supremo) y solo con una herramienta de navegación real ' +
+  '(p. ej. Claude en Chrome, disponible solo en los planes de pago de Claude y solo en Google Chrome); la búsqueda web general (web_search/web_fetch) nunca vale para el CENDOJ, ni con autorización. ' +
+  'Sin haber verificado una sentencia en el CENDOJ con ese navegador, no la nombres ni afirmes nada de ella.';
+
+const DURACION_PERMISO_CENDOJ =
+  'Una vez concedido, el permiso vale hasta que el usuario cierre Claude Desktop: no vuelvas a llamar a cendoj_pedir_permiso ni a preguntarle en cada consulta; ' +
+  'si el usuario lo retira, deja de consultar el CENDOJ.';
+
+function textoCendojYaAutorizado() {
+  return (
+    'El usuario YA autorizó en esta sesión de Claude Desktop que consultes el CENDOJ con tu navegador: NO le vuelvas a pedir permiso ni le preguntes, ' +
+    'y no vuelvas a llamar a esta herramienta hasta que cierre la aplicación; sigue con la consulta. La consulta la realizas tú, en su nombre y para su uso particular ' +
+    '(esta extensión nunca accede al CENDOJ). ' + LIMITES_CENDOJ
+  );
+}
+
 function textoCendojPedirFallback(motivo, conVentana = true) {
   const que = motivo ? ` para: ${motivo}` : '';
+  const comun =
+    'Si el usuario autoriza, la consulta la haces tú con tu navegador, en su nombre (esta extensión nunca accede al CENDOJ). ' +
+    'Si no autoriza, o no tienes navegador, NO abras el CENDOJ ni lo sustituyas por una búsqueda web general: da el enlace y las instrucciones de rellenado de la sección ENLACES para que lo haga él. ' +
+    LIMITES_CENDOJ;
   if (!conVentana) {
     // 1.6.1: cliente sin MCP Apps -- no hay ventana; el permiso se pide por texto.
+    // 1.7.2: el servidor no puede recordar un «sí» escrito: vale para el resto de la conversación.
     return (
       'Este cliente no admite ventanas: NO se ha mostrado ninguna al usuario. Pregúntale tú textualmente: ' +
       `"¿Autorizas que consulte el CENDOJ (poderjudicial.es) con mi navegador${que}? Responde sí o no." y espera su respuesta. ` +
       'Solo cuenta como autorización un "sí/autorizo" explícito del usuario escrito en la conversación; silencio, evasivas o "sigue" sin más NO son autorización. ' +
-      'Si el usuario autoriza, la consulta la haces tú con tu navegador, en su nombre (esta extensión nunca accede al CENDOJ). Una autorización solo vale para una herramienta de navegación real; NUNCA la uses para buscar en la web general ni para afirmar jurisprudencia de terceros. ' +
-      'Si no autoriza, o no tienes navegador, NO abras el CENDOJ ni lo sustituyas por una búsqueda web general: da el enlace y las instrucciones de rellenado de la sección ENLACES para que lo haga él.'
+      'Un "sí" explícito vale para el resto de esta conversación: no vuelvas a preguntarlo en cada consulta. ' +
+      comun
     );
   }
   return (
-    'Se ha mostrado al usuario una ventana para autorizar o denegar que consultes el CENDOJ con tu navegador. ' +
-    'ESPERA su respuesta antes de abrir poderjudicial.es: solo cuenta como autorización un "sí/autorizo" explícito del usuario (por la ventana, que llegará como mensaje suyo, o por texto). ' +
-    'Silencio, evasivas o "sigue" sin más NO son autorización. Si tu cliente no admite ventanas y no ves respuesta, pregunta tú textualmente: ' +
-    `"¿Autorizas que consulte el CENDOJ (poderjudicial.es) con mi navegador${que}? Responde sí o no." y espera. ` +
-    'Si el usuario autoriza, la consulta la haces tú con tu navegador, en su nombre (esta extensión nunca accede al CENDOJ). Una autorización solo vale para una herramienta de navegación real; NUNCA la uses para buscar en la web general ni para afirmar jurisprudencia de terceros. ' +
-    'Si no autoriza, o no tienes navegador, NO abras el CENDOJ ni lo sustituyas por una búsqueda web general: da el enlace y las instrucciones de rellenado de la sección ENLACES para que lo haga él.'
+    'Se ha ofrecido al usuario una ventana para autorizar o denegar que consultes el CENDOJ con tu navegador, pero puede que su cliente no la muestre ' +
+    '(en Claude Desktop con una extensión local a veces no se ve), y desde aquí no se puede saber. ' +
+    'Si el usuario YA había escrito en esta conversación un «autorizo» explícito para consultar el CENDOJ, eso basta: no esperes la ventana ni vuelvas a preguntar. Si no, ' +
+    `pregúntale SIEMPRE también por texto, en un mensaje corto y literal: "¿Autorizas que consulte el CENDOJ (poderjudicial.es) con mi navegador${que}? Responde sí o no." ` +
+    'y ESPERA su respuesta antes de abrir poderjudicial.es: solo cuenta como autorización un "sí/autorizo" explícito del usuario (por la ventana, que llegará como mensaje suyo, o por texto). ' +
+    'Silencio, evasivas o "sigue" sin más NO son autorización. ' +
+    DURACION_PERMISO_CENDOJ + ' ' +
+    comun
   );
 }
 
@@ -610,7 +747,7 @@ const TOOLS = [
     name: 'boe_elegir_ambito',
     annotations: { title: 'Elegir el ámbito de la búsqueda', readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     description:
-      'Muestra al usuario un formulario para elegir el ámbito de una investigación jurídica abierta: BOE, Tribunal Constitucional, Unión Europea, CENDOJ, y/o una o varias comunidades autónomas. Llámala ANTES de buscar nada cuando la petición sea una investigación abierta ("qué dice la normativa sobre X"), nunca para una cita concreta ya identificada (usa boe_verificar_cita/euskadi_verificar_cita directamente en ese caso). No le pases argumentos. En clientes que admiten formularios interactivos (MCP Apps) se muestra un formulario real; en el resto, el resultado trae la pregunta en texto para que la hagas tú. Espera la respuesta (formulario o texto) antes de llamar a cualquier otra herramienta de búsqueda. ' + REGLA_ESPERA_AMBITO,
+      'Ofrece al usuario un formulario para elegir el ámbito de una investigación jurídica abierta: BOE, Tribunal Constitucional, Unión Europea, CENDOJ, y/o una o varias comunidades autónomas. Llámala ANTES de buscar nada cuando la petición sea una investigación abierta ("qué dice la normativa sobre X"), nunca para una cita concreta ya identificada (usa boe_verificar_cita/euskadi_verificar_cita directamente en ese caso). No le pases argumentos. En clientes que admiten formularios interactivos (MCP Apps) se ofrece un formulario, pero puede que el cliente no lo muestre (el servidor no puede saberlo): haz SIEMPRE también la pregunta en texto, corta y literal, que trae el resultado. Espera la respuesta (formulario o texto) antes de llamar a cualquier otra herramienta de búsqueda. ' + REGLA_ESPERA_AMBITO,
     inputSchema: { type: 'object', properties: {} },
     _meta: { ui: { resourceUri: RESOURCE_AMBITO_URI } },
   },
@@ -633,7 +770,7 @@ const TOOLS = [
   {
     name: 'cendoj_pedir_permiso',
     description:
-      'REGLA DE ORO: sin haber verificado una sentencia del Supremo o de las Audiencias en el CENDOJ NO puedes afirmar NADA de ella — ni ponente, ni fecha, ni ECLI, ni contenido, ni "de memoria" ni "porque está muy citada": di únicamente que no has podido verificarla. OBLIGATORIA antes de abrir o consultar el CENDOJ (poderjudicial.es) con tu navegador, por poco que vayas a hacer: muestra al usuario una ventana emergente pidiéndole confirmación explícita para que consultes el CENDOJ en su nombre. Antes de llamarla, en una frase di qué vas a buscar y pásalo en "motivo". Después ESPERA la respuesta del usuario: solo si autoriza (por la ventana, que llegará como mensaje suyo, o por texto) puedes navegar al CENDOJ; si no autoriza, no responde o no tienes navegador, no lo abras y da el enlace e instrucciones para que lo consulte él. El permiso vale solo para la tarea de investigación en curso; en otra tarea, vuelve a pedirlo. Esta herramienta NO consulta el CENDOJ: solo pide el permiso. El conector nunca accede al CENDOJ por sí mismo. SOLO aplica si dispones de una herramienta de navegación real (p. ej. Claude en Chrome): si solo tienes búsqueda web general (web_search/web_fetch), no llames a esta herramienta, no busques, no ofrezcas buscar en la web general como alternativa y da el enlace https://www.poderjudicial.es/search/indexAN.jsp (NO index.jsp, que solo cubre el Tribunal Supremo) con instrucciones concretas — y una autorización del usuario NO convierte la búsqueda web general en una vía válida para el CENDOJ. Con autorización y navegador real, la consulta la realizas tú, en nombre del usuario y para su uso particular: solo consultas puntuales, sin descargas masivas ni redistribución de resoluciones. Sin navegador real, explícale al usuario que para que consultes tú el CENDOJ necesita instalar y conectar la extensión Claude en Chrome con Claude Desktop, y dale mientras tanto el enlace y los pasos.',
+      'REGLA DE ORO: sin haber verificado una sentencia del Supremo o de las Audiencias en el CENDOJ NO puedes afirmar NADA de ella — ni ponente, ni fecha, ni ECLI, ni contenido, ni "de memoria" ni "porque está muy citada": di únicamente que no has podido verificarla. OBLIGATORIA antes de abrir o consultar el CENDOJ (poderjudicial.es) con tu navegador por PRIMERA VEZ en esta sesión de Claude Desktop, salvo que el usuario ya haya escrito en esta conversación un «autorizo» explícito para consultarlo (eso basta: no hace falta llamarla ni esperar la ventana): ofrece al usuario una ventana emergente pidiéndole confirmación explícita para que consultes el CENDOJ en su nombre, pero puede que su cliente no la muestre (el servidor no puede saberlo). Antes de llamarla, en una frase di qué vas a buscar y pásalo en "motivo". Después pregúntale SIEMPRE también por texto, corto y literal («¿Autorizas que consulte el CENDOJ (poderjudicial.es) con mi navegador? Responde sí o no.»), y ESPERA la respuesta del usuario: solo si autoriza (por la ventana, que llegará como mensaje suyo, o por texto) puedes navegar al CENDOJ; si no autoriza, no responde o no tienes navegador, no lo abras y da el enlace e instrucciones para que lo consulte él. Una vez concedido, el permiso vale hasta que el usuario cierre Claude Desktop: no vuelvas a llamar a esta herramienta ni a preguntarle en cada consulta (si la llamas de nuevo, responde que ya está autorizado y no le pregunta nada); si el usuario lo retira, deja de consultar el CENDOJ. Esta herramienta NO consulta el CENDOJ: solo pide el permiso. El conector nunca accede al CENDOJ por sí mismo. SOLO aplica si dispones de una herramienta de navegación real (p. ej. Claude en Chrome): si solo tienes búsqueda web general (web_search/web_fetch), no llames a esta herramienta, no busques, no ofrezcas buscar en la web general como alternativa y da el enlace https://www.poderjudicial.es/search/indexAN.jsp (NO index.jsp, que solo cubre el Tribunal Supremo) con instrucciones concretas — y una autorización del usuario NO convierte la búsqueda web general en una vía válida para el CENDOJ. Con autorización y navegador real, la consulta la realizas tú, en nombre del usuario y para su uso particular, y aunque no vuelvas a pedir permiso siguen los límites del aviso legal y del Reglamento 3/2010 del CGPJ: solo las consultas puntuales necesarias para lo que pidió el usuario, con pausa entre ellas; nunca descargas masivas o en bloque, ni recorrer listados completos, ni conservar o redistribuir resoluciones, ni uso comercial. Consultar «al detalle» es revisar a fondo lo que el usuario pidió, no hacer barridos. Para leer sentencias concretas hace falta el «sí» del usuario a un lote de unas pocas, y NO intentas descargar tú el PDF salvo que él te lo pida expresamente: antes, abre cada resultado en el CENDOJ y toma su enlace directo openDocument tal como lo da el buscador (nunca construido ni de memoria; sin él, no la propongas); propón el lote SIEMPRE con el recuadro fijo «📄 Sentencias que propongo leer — te toca a ti» (cada una con ROJ o ECLI, órgano y su enlace directo; antes, comprueba si Descargas está conectada a este chat: si lo está, sin paso 0; si no o no lo sabes, empieza diciendo «Descargas no está conectada a este chat» y pon como paso 0 añadirla con el botón «+» de la caja de mensaje → «Añadir carpeta», nunca la condición copiada; «Qué hacer»: 1, abrir cada enlace; 2, pulsar el icono de descarga, arriba a la derecha del visor; 3, escribirte «ya están»; y «Puedes responderme»); su «ya están» es el «sí» al lote. No pidas acceso a carpetas a mitad del chat; si no quiere conectar Descargas, que adjunte el PDF. Nunca presentes indexAN.jsp como enlace a una sentencia (abre el buscador, no la sentencia). Al terminar, recuerda que borrarlas es cosa del usuario. Sin navegador real, explícale al usuario que para que consultes tú el CENDOJ necesita instalar y conectar la extensión Claude en Chrome con Claude Desktop, y dale mientras tanto el enlace y los pasos.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -667,9 +804,17 @@ const TOOLS = [
 // exigir que YA se haya llamado a `cendoj_pedir_permiso` en esta misma sesión
 // antes de aceptar una respuesta cierra el caso más simple del hallazgo: una
 // llamada suelta a `cendoj_permiso_respuesta` sin haber pedido permiso nunca.
-// De un solo uso (se consume al responder, autorizado o no), coherente con
-// "vale solo para esta tarea de investigación" que ya dice el propio texto.
+// La petición pendiente es de un solo uso (se consume al responder,
+// autorizado o no).
+// 1.7.2 (decisión del usuario, 21/11/2026): una vez concedido por la ventana,
+// el permiso dura hasta cerrar Claude Desktop (memoria de este proceso, sin
+// caducidad por tiempo ni disco): `cendojAutorizado`. Solo lo activa una
+// respuesta `autorizado === true` a una petición pendiente; la llamada suelta
+// sigue rechazada (B9).
 let permisoCendojPendiente = false;
+let cendojAutorizado = false;
+let avisoVersion = null; // texto del aviso de versión nueva (ver actualizacion.js)
+let avisosDados = 0;
 
 // 1.6.1: `cendoj_permiso_respuesta` y `boe_ambito_seleccionado` son solo para
 // las ventanas (visibility ["app"]). Un cliente con MCP Apps las oculta al
@@ -852,20 +997,23 @@ async function ejecutar(name, args) {
       return { consultado: hoyISO(), cita: { norma: args.norma, articulo: args.articulo || null }, ...r, aviso: AVISO_UE };
     }
     case 'boe_elegir_ambito': {
-      return { formulario_mostrado: clienteAdmiteApps ? 'ámbito de búsqueda' : null, texto_alternativo_si_no_hay_formulario: textoAmbitoFallback() };
+      return {
+        formulario_ofrecido: clienteAdmiteApps ? 'ámbito de búsqueda (puede que tu cliente no lo muestre)' : null,
+        pregunta_por_texto: textoAmbitoFallback(clienteAdmiteApps),
+      };
     }
     case 'boe_ambito_seleccionado': {
       if (!clienteAdmiteApps) {
         return {
           ambito_elegido_por_el_usuario: 'RECHAZADO: este cliente no admite el formulario de ámbito',
-          instruccion: 'Esta herramienta es solo para el formulario, nunca se llama directamente. Pregunta al usuario por texto qué ámbito quiere (ver texto_alternativo_si_no_hay_formulario de boe_elegir_ambito) y espera su respuesta.',
+          instruccion: 'Esta herramienta es solo para el formulario, nunca se llama directamente. Pregunta al usuario por texto qué ámbito quiere (ver pregunta_por_texto de boe_elegir_ambito) y espera su respuesta.',
         };
       }
       const partes = [];
       if (args.boe) partes.push('BOE');
       if (args.tc) partes.push('Tribunal Constitucional (boe_tc_*)');
       if (args.ue) partes.push('Unión Europea: reglamentos, directivas y decisiones (ue_*, fuente distinta del BOE; en castellano salvo que el usuario pida inglés)');
-      if (args.cendoj) partes.push('CENDOJ, resto de jurisprudencia (el conector no accede a él. Si vas a consultarlo con tu navegador, ANTES llama a cendoj_pedir_permiso y espera la autorización explícita del usuario; si no autoriza o no tienes navegador, da instrucciones/enlace de la sección ENLACES de las instrucciones del proyecto)');
+      if (args.cendoj) partes.push('CENDOJ, resto de jurisprudencia (el conector no accede a él. Si vas a consultarlo con tu navegador y aún no tienes su autorización en esta sesión de Claude Desktop, ANTES llama a cendoj_pedir_permiso y espera la autorización explícita del usuario (una vez concedida, no vuelvas a pedirla); si no autoriza o no tienes navegador, da instrucciones/enlace de la sección ENLACES de las instrucciones del proyecto)');
       const comunidades = Array.isArray(args.comunidades) ? args.comunidades : [];
       if (comunidades.length) {
         const nombres = comunidades.map((c) => NOMBRES_COMUNIDADES[c] || c).join(', ');
@@ -878,9 +1026,18 @@ async function ejecutar(name, args) {
     }
     case 'cendoj_pedir_permiso': {
       const motivo = typeof args.motivo === 'string' ? args.motivo.trim().slice(0, 400) : '';
+      // 1.7.2: ya autorizado en este proceso -> no se pide nada ni se abre otra petición.
+      if (cendojAutorizado) {
+        return {
+          permiso_cendoj: 'YA AUTORIZADO por el usuario (vale hasta cerrar Claude Desktop)',
+          ventana_ofrecida: null,
+          motivo: motivo || null,
+          instruccion: textoCendojYaAutorizado(),
+        };
+      }
       permisoCendojPendiente = true;
       return {
-        ventana_mostrada: clienteAdmiteApps ? 'permiso para consultar el CENDOJ' : null,
+        ventana_ofrecida: clienteAdmiteApps ? 'permiso para consultar el CENDOJ (puede que tu cliente no la muestre: pregunta también por texto)' : null,
         motivo: motivo || null,
         instruccion: textoCendojPedirFallback(motivo, clienteAdmiteApps),
       };
@@ -899,6 +1056,16 @@ async function ejecutar(name, args) {
       // antes, en esta misma sesión), no hay nada que "responder" -- se
       // rechaza en vez de fiarse ciegamente de `args.autorizado`.
       if (!permisoCendojPendiente) {
+        // 1.7.2: «No autorizar» pulsado en una ventana cuando ya estaba autorizado
+        // retira el permiso (dirección segura: nunca concede nada).
+        if (cendojAutorizado && args.autorizado === false) {
+          cendojAutorizado = false;
+          return {
+            permiso_cendoj: 'RETIRADO por el usuario',
+            instruccion:
+              'El usuario ha retirado el permiso: NO vuelvas a abrir el CENDOJ ni lo sustituyas por una búsqueda web general. Da el enlace (https://www.poderjudicial.es/search/indexAN.jsp) y las instrucciones concretas de rellenado para que lo consulte él.',
+          };
+        }
         return {
           permiso_cendoj: 'RECHAZADO: no hay ninguna petición de permiso pendiente',
           instruccion:
@@ -907,10 +1074,12 @@ async function ejecutar(name, args) {
       }
       permisoCendojPendiente = false;
       if (args.autorizado === true) {
+        cendojAutorizado = true;
         return {
-          permiso_cendoj: 'AUTORIZADO por el usuario, solo para esta tarea de investigación',
+          permiso_cendoj: 'AUTORIZADO por el usuario, hasta que cierre Claude Desktop',
           instruccion:
-            'Solo si dispones de una herramienta de navegación real (p. ej. Claude en Chrome), puedes abrir https://www.poderjudicial.es/search/indexAN.jsp y hacer la consulta que anunciaste; con solo búsqueda web general NO tienes acceso: no busques, explícale que necesita instalar y conectar la extensión Claude en Chrome con Claude Desktop para que consultes tú, y da el enlace e instrucciones. Con navegador real, la consulta la realizas tú, en nombre del usuario y para su uso particular, solo con consultas puntuales (nunca descargas masivas ni redistribuir resoluciones), siguiendo la sección ENLACES/CENDOJ de las instrucciones del proyecto. No lo extiendas a otras tareas: en otra, vuelve a llamar a cendoj_pedir_permiso.',
+            'Solo si dispones de una herramienta de navegación real (p. ej. Claude en Chrome, disponible solo en los planes de pago de Claude), puedes abrir https://www.poderjudicial.es/search/indexAN.jsp y hacer la consulta que anunciaste; con solo búsqueda web general NO tienes acceso: no busques, explícale que necesita instalar y conectar la extensión Claude en Chrome con Claude Desktop para que consultes tú, y da el enlace e instrucciones. Con navegador real, la consulta la realizas tú, en nombre del usuario y para su uso particular, siguiendo la sección ENLACES/CENDOJ de las instrucciones del proyecto. ' +
+            DURACION_PERMISO_CENDOJ + ' ' + LIMITES_CENDOJ,
         };
       }
       return {
@@ -954,7 +1123,7 @@ async function manejar(msg) {
         capabilities: { tools: { listChanged: false }, resources: { listChanged: false } },
         serverInfo: { name: 'boe-consolidada', version: VERSION },
         instructions:
-          'REGLA Nº 1, SIN EXCEPCIONES: si en ESTA conversación no has verificado una sentencia del Supremo, la Audiencia Nacional, los TSJ o las Audiencias en el CENDOJ con un navegador real, NO nombres ninguna: ni su número, ni ponente, fecha, ECLI o contenido, ni "la doctrina del Supremo (STS x/aaaa…)", ni "la muy conocida…", ni "me suena", ni como ejemplo, ni al ofrecer tu ayuda, ni "mientras tanto, de lo que recuerdo", ni "las fuentes secundarias dicen que trata de…", ni MIENTRAS ESPERAS la autorización del usuario para consultar el CENDOJ (en ese mensaje limítate a pedir el permiso; no describas la sentencia ni su materia). Cuando el usuario pida verificar una sentencia por su número, NO adelantes de qué trata: verifícala primero. Tampoco lo digas para negarte: ni "aunque me suene", ni "aunque la conozco", ni "aunque es muy citada" — di solo "no he podido verificarla". REGLA Nº 2: Claude en Chrome (la extensión de navegador que permitiría consultar el CENDOJ) solo está disponible en los planes de pago de Claude (Pro, Max, Team y Enterprise) y solo en Google Chrome; SIEMPRE que lo menciones al usuario, dilo en esa misma frase (p. ej. "Claude en Chrome, disponible solo en planes de pago"), y no se lo ofrezcas como solución sin decirlo. Puedes describir la materia sin citar sentencias y decir que la doctrina jurisprudencial hay que verificarla en el CENDOJ. Herramientas de consulta de legislación y jurisprudencia constitucional española: la colección consolidada del BOE (boe_*, estatal y autonómica en la medida en que el BOE la recoge), sentencias del Tribunal Constitucional publicadas en el BOE (boe_tc_*, distintas de la legislación — indícalo siempre), actos y anuncios de empresas publicados en el BORME (boe_borme_*, tampoco son legislación — indícalo; solo por denominación de la empresa: nunca busques ni recopiles información sobre personas físicas, cuyos nombres en el BORME son datos personales publicados solo para la publicidad mercantil) y, para el País Vasco específicamente, Open Data Euskadi/BOPV (euskadi_*, incluye Órdenes y Resoluciones que el BOE no tiene) y la normativa de la Unión Europea (ue_*: reglamentos, directivas y decisiones, en castellano o en inglés según el parámetro "idioma", desde CELLAR/EUR-Lex de la Oficina de Publicaciones de la UE — fuente distinta del BOE; su texto consolidado es documental, lo auténtico es el DOUE; nunca cambies de idioma sin decírselo al usuario). No hay acceso a ninguna otra jurisprudencia (Supremo, Audiencias...): eso depende del CENDOJ, fuera de este conector. REGLA CENDOJ: el conector nunca accede al CENDOJ. Sin haber verificado una sentencia del Supremo/Audiencias en el CENDOJ, NO afirmes nada de ella (ni ponente, fecha, ECLI o contenido, ni de memoria): di que no has podido verificarla. "Navegador" significa una herramienta de navegación real (p. ej. la extensión Claude en Chrome), NUNCA la búsqueda web general (web_search/web_fetch): si solo dispones de búsqueda web, NO tienes acceso al CENDOJ ni a jurisprudencia que no sea del TC — no busques ni afirmes nada de ella; da el enlace https://www.poderjudicial.es/search/indexAN.jsp (SIEMPRE indexAN.jsp, NUNCA index.jsp: este último solo cubre el Tribunal Supremo) y las instrucciones para que lo consulte el usuario. Si tienes navegador real y el usuario quiere jurisprudencia del Supremo/Audiencias, ANTES de abrir poderjudicial.es llama a cendoj_pedir_permiso (ventana de confirmación) y espera su autorización explícita; con ella, la consulta la realizas TÚ con tu navegador, en nombre del usuario y para su uso particular (el conector sigue sin acceder al CENDOJ). LÍMITES de esa consulta (aviso legal y Reglamento 3/2010 del CGPJ): solo las consultas puntuales necesarias para la petición concreta del usuario, con pausa entre ellas; NUNCA descargas masivas, ni recorrer listados completos, ni guardar o redistribuir resoluciones, ni uso comercial; sin ella, da el enlace e instrucciones. SIN NAVEGADOR REAL (p. ej. el Chat de Claude Desktop sin la extensión Claude en Chrome conectada): cuando el usuario pida jurisprudencia del Supremo/Audiencias, díselo con claridad en las primeras líneas — (1) esta extensión nunca accede al CENDOJ (Reglamento 3/2010 del CGPJ); solo puedes consultarlo tú, en su nombre y con su autorización expresa, si dispones de un navegador real; (2) ahora no dispones de él, y para que lo consultes tú debe instalar y conectar la extensión Claude en Chrome con Claude Desktop (SIEMPRE que la menciones, di que solo está disponible en los planes de pago de Claude —Pro, Max, Team y Enterprise— y solo en Google Chrome); (3) mientras tanto, el enlace y los pasos para consultarlo él mismo. Aviso: Claude en Chrome solo está disponible en los planes de pago de Claude (Pro, Max, Team y Enterprise) y solo en Google Chrome; si el usuario tiene el plan gratuito, no le insistas en instalarlo: dile que en su plan la consulta debe hacerla él mismo (enlace, campo «Nº Resolución» con el número tal cual y «Tipo de órgano: Tribunal Supremo», sin fecha) y que te pegue el resultado para que lo analices. No lo presentes como un fallo ni prometas hacerlo más tarde sin navegador. Y sin verificarla en el CENDOJ NO nombres ninguna sentencia concreta: ni por su número, ni "que te suena", ni "muy conocida", ni como ejemplo. Úsalas como ÚNICA fuente para cualquier afirmación sobre normas, artículos o sentencias del TC españoles, o sobre lo publicado en el BORME o la normativa de la UE. Nunca cites nada sin haberlo recuperado con estas herramientas, tampoco mientras esperas que el usuario elija el ámbito o autorice una consulta: en ese mensaje no nombres ninguna norma, acto de la UE ni sentencia concretos, ni como ejemplo ni como «punto de partida probable». Si ninguna herramienta devuelve resultados, dilo explícitamente en vez de contestar de memoria. Cada fuente indica su propio aviso de valor no oficial en cada respuesta.',
+          'REGLA Nº 1, SIN EXCEPCIONES: si en ESTA conversación no has verificado una sentencia del Supremo, la Audiencia Nacional, los TSJ o las Audiencias en el CENDOJ con un navegador real, NO nombres ninguna: ni su número, ni ponente, fecha, ECLI o contenido, ni "la doctrina del Supremo (STS x/aaaa…)", ni "la muy conocida…", ni "me suena", ni como ejemplo, ni al ofrecer tu ayuda, ni "mientras tanto, de lo que recuerdo", ni "las fuentes secundarias dicen que trata de…", ni MIENTRAS ESPERAS la autorización del usuario para consultar el CENDOJ (en ese mensaje limítate a pedir el permiso; no describas la sentencia ni su materia). Cuando el usuario pida verificar una sentencia por su número, NO adelantes de qué trata: verifícala primero. Tampoco lo digas para negarte: ni "aunque me suene", ni "aunque la conozco", ni "aunque es muy citada" — di solo "no he podido verificarla". ' + REGLA_WEB_JURISPRUDENCIA + ' ' + REGLA_ALCANCE_JURISPRUDENCIA + ' ' + MATICES_LECTURA_CENDOJ + ' REGLA Nº 2: Claude en Chrome (la extensión de navegador que permitiría consultar el CENDOJ) solo está disponible en los planes de pago de Claude (Pro, Max, Team y Enterprise) y solo en Google Chrome; SIEMPRE que lo menciones al usuario, dilo en esa misma frase (p. ej. "Claude en Chrome, disponible solo en planes de pago"), y no se lo ofrezcas como solución sin decirlo. Puedes describir la materia sin citar sentencias y decir que la doctrina jurisprudencial hay que verificarla en el CENDOJ. Herramientas de consulta de legislación y jurisprudencia constitucional española: la colección consolidada del BOE (boe_*, estatal y autonómica en la medida en que el BOE la recoge), sentencias del Tribunal Constitucional publicadas en el BOE (boe_tc_*, distintas de la legislación — indícalo siempre), actos y anuncios de empresas publicados en el BORME (boe_borme_*, tampoco son legislación — indícalo; solo por denominación de la empresa: nunca busques ni recopiles información sobre personas físicas, cuyos nombres en el BORME son datos personales publicados solo para la publicidad mercantil) y, para el País Vasco específicamente, Open Data Euskadi/BOPV (euskadi_*, incluye Órdenes y Resoluciones que el BOE no tiene) y la normativa de la Unión Europea (ue_*: reglamentos, directivas y decisiones, en castellano o en inglés según el parámetro "idioma", desde CELLAR/EUR-Lex de la Oficina de Publicaciones de la UE — fuente distinta del BOE; su texto consolidado es documental, lo auténtico es el DOUE; nunca cambies de idioma sin decírselo al usuario). COMUNIDADES AUTÓNOMAS (todas salvo el País Vasco, que tiene euskadi_*): ninguna otra ofrece API consultable. Para normativa autonómica que el BOE no recoge (Órdenes, Resoluciones, convocatorias), con navegador real empieza por la web de la Consejería competente, que suele dar la referencia exacta (fecha, número, boletín y página), y verifica y cita el texto en el boletín oficial de esa comunidad; su buscador, solo como alternativa, y nunca la búsqueda web general. Sin navegador, dilo y no improvises. No hay acceso a ninguna otra jurisprudencia (Supremo, Audiencias...): eso depende del CENDOJ, fuera de este conector. REGLA CENDOJ: el conector nunca accede al CENDOJ. Sin haber verificado una sentencia del Supremo/Audiencias en el CENDOJ, NO afirmes nada de ella (ni ponente, fecha, ECLI o contenido, ni de memoria): di que no has podido verificarla. "Navegador" significa una herramienta de navegación real (p. ej. la extensión Claude en Chrome), NUNCA la búsqueda web general (web_search/web_fetch): si solo dispones de búsqueda web, NO tienes acceso al CENDOJ ni a jurisprudencia que no sea del TC — no busques ni afirmes nada de ella; da el enlace https://www.poderjudicial.es/search/indexAN.jsp (SIEMPRE indexAN.jsp, NUNCA index.jsp: este último solo cubre el Tribunal Supremo) y las instrucciones para que lo consulte el usuario. Si tienes navegador real y el usuario quiere jurisprudencia del Supremo/Audiencias, ANTES de abrir poderjudicial.es por primera vez necesitas su autorización explícita: si ya ha escrito en esta conversación un «autorizo» explícito para el CENDOJ, basta; si no, llama a cendoj_pedir_permiso (ofrece una ventana de confirmación que puede no verse: pregunta SIEMPRE también por texto) y espera; una vez concedida vale hasta que cierre Claude Desktop: no vuelvas a pedirla en cada consulta. Con ella, la consulta la realizas TÚ con tu navegador, en nombre del usuario y para su uso particular (el conector sigue sin acceder al CENDOJ). LÍMITES de esa consulta, que siguen aunque no vuelvas a pedir permiso (aviso legal y Reglamento 3/2010 del CGPJ): solo las consultas puntuales necesarias para la petición concreta del usuario, con pausa entre ellas; NUNCA descargas masivas o en bloque, ni recorrer listados completos, ni conservar o redistribuir resoluciones, ni uso comercial; «al detalle» significa revisar a fondo lo que pidió, no hacer barridos. PDF de sentencias concretas: leerlas es lícito solo con el «sí» expreso del usuario a un LOTE de unas pocas, sin barridos. NO intentes descargar tú el PDF (el visor embebido lo bloquea), salvo que el usuario te lo pida expresamente. Antes de proponer un lote, abre cada resultado en el propio CENDOJ y toma su enlace directo openDocument tal como lo da el buscador (nunca construido ni de memoria; sin ese enlace, no la propongas). Propón SIEMPRE el lote con este RECUADRO fijo (varias sentencias en el mismo recuadro). ' + PLANTILLAS_LOTE_CENDOJ + '\nSu «ya están» es el «sí» al lote. NO pidas acceso a carpetas a mitad del chat (Claude Desktop lo deniega sin enseñar cuadro): Descargas conectada al chat o, si no, la variante B; si no quiere conectarla, que adjunte el PDF; nunca leas una carpeta no conectada; lee solo las del lote, cita solo lo leído y no las conserves ni redistribuyas; nunca presentes indexAN.jsp como enlace a una sentencia (abre el buscador): sin enlace directo, no pongas enlace y di que se busca por ECLI en indexAN.jsp, igual que si un enlace no abre; al terminar, recuerda que siguen en Descargas y que borrarlas es cosa del usuario; sin autorización, da el enlace e instrucciones. SIN NAVEGADOR REAL (p. ej. el Chat de Claude Desktop sin la extensión Claude en Chrome conectada): cuando el usuario pida jurisprudencia del Supremo/Audiencias, díselo con claridad en las primeras líneas — (1) esta extensión nunca accede al CENDOJ (Reglamento 3/2010 del CGPJ); solo puedes consultarlo tú, en su nombre y con su autorización expresa, si dispones de un navegador real; (2) ahora no dispones de él, y para que lo consultes tú debe instalar y conectar la extensión Claude en Chrome con Claude Desktop (SIEMPRE que la menciones, di que solo está disponible en los planes de pago de Claude —Pro, Max, Team y Enterprise— y solo en Google Chrome); (3) mientras tanto, el enlace y los pasos para consultarlo él mismo. Aviso: Claude en Chrome solo está disponible en los planes de pago de Claude (Pro, Max, Team y Enterprise) y solo en Google Chrome; si el usuario tiene el plan gratuito, no le insistas en instalarlo: dile que en su plan la consulta debe hacerla él mismo (enlace, campo «Nº Resolución» con el número tal cual y «Tipo de órgano: Tribunal Supremo», sin fecha) y que te pegue el resultado para que lo analices. No lo presentes como un fallo ni prometas hacerlo más tarde sin navegador. Y sin verificarla en el CENDOJ NO nombres ninguna sentencia concreta: ni por su número, ni "que te suena", ni "muy conocida", ni como ejemplo. Úsalas como ÚNICA fuente para cualquier afirmación sobre normas, artículos o sentencias del TC españoles, o sobre lo publicado en el BORME o la normativa de la UE. Nunca cites nada sin haberlo recuperado con estas herramientas, tampoco mientras esperas que el usuario elija el ámbito o autorice una consulta: en ese mensaje no nombres ninguna norma, acto de la UE ni sentencia concretos, ni como ejemplo ni como «punto de partida probable». Si ninguna herramienta devuelve resultados, dilo explícitamente en vez de contestar de memoria. Cada fuente indica su propio aviso de valor no oficial en cada respuesta.',
       });
     }
     case 'notifications/initialized':
@@ -993,6 +1162,11 @@ async function manejar(msg) {
       const nombre = params && params.name;
       try {
         const datos = await ejecutar(nombre, params && params.arguments);
+        // Aviso de versión nueva (1.7.2): solo en las primeras respuestas de cada arranque.
+        if (avisoVersion && avisosDados < 2 && datos && typeof datos === 'object' && !Array.isArray(datos)) {
+          avisosDados++;
+          datos.aviso_actualizacion = avisoVersion;
+        }
         return responder(id, { content: [{ type: 'text', text: JSON.stringify(datos, null, 1) }] });
       } catch (e) {
         log(`[error] ${nombre}: ${e.stack || e.message}`);
@@ -1034,6 +1208,10 @@ process.stdin.on('data', (chunk) => {
 });
 
 process.stdin.on('end', () => process.exit(0));
+// Comprobación de versión en segundo plano: no retrasa el arranque ni ninguna respuesta.
+ACT.comprobar(VERSION).then((r) => {
+  if (r) { avisoVersion = ACT.textoAviso(VERSION, r.ultima, r.url); log(`[actualización] hay versión nueva: ${r.ultima}`); }
+}).catch(() => {});
 log('boe-consolidada MCP listo (fuentes: boe.es/datosabiertos, api.euskadi.eus/bopv, publications.europa.eu/cellar)');
 
 module.exports = N;

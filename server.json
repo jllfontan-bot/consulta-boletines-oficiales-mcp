@@ -3,12 +3,12 @@
   "name": "io.github.jllfontan-bot/consulta-boletines-oficiales",
   "title": "Consulta Boletines Oficiales - Legislación consolidada",
   "description": "Legislación consolidada, sentencias del TC, BORME, BOPV y normativa de la UE, con citas verificadas",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/jllfontan-bot/consulta-boletines-oficiales-mcp/releases/download/v1.7.1/consulta-boletines-oficiales-v1.7.1.mcpb",
-      "fileSha256": "bee32a1dff40db9488ec6d0f3244aa0d2e9ff7a0acda858009c7fa98d2722b7a",
+      "identifier": "https://github.com/jllfontan-bot/consulta-boletines-oficiales-mcp/releases/download/v1.7.2/consulta-boletines-oficiales-v1.7.2.mcpb",
+      "fileSha256": "3456e5196870c1ac005af6bc91132f4de8fedd5426bd7c9ca835268ae7d6de52",
       "transport": {
         "type": "stdio"
       }

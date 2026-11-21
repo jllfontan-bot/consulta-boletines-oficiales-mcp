@@ -202,6 +202,8 @@ En resumen: cuanto más caro de pedir y más estable es el dato, más dura la ca
 
 **Ante una investigación abierta, Claude pregunta el ámbito antes de buscar.** No la restringe por defecto al BOE: te pregunta si quieres BOE, normativa de la Unión Europea, también jurisprudencia (TC/CENDOJ) y/o la normativa propia de alguna comunidad autónoma en concreto. Para lo que no tiene acceso automatizado (CENDOJ, cualquier comunidad salvo el País Vasco) te da instrucciones de rellenado o el enlace directo al buscador oficial (Aragón y La Rioja admiten el enlace ya relleno con el texto buscado) — nunca como llamada automática del conector.
 
+**Aviso de versión nueva (desde la 1.7.2).** Como mucho una vez cada 24 horas, el conector pregunta a `api.github.com` cuál es la última versión publicada de este repositorio, solo para avisarte si hay una nueva. No envía ningún dato tuyo ni de tus consultas, y no descarga ni instala nada: si hay versión nueva, te da el enlace. Se desactiva con la variable de entorno `BOE_CONSOLIDADA_SIN_AVISO_ACTUALIZACION=1` o creando el fichero vacío `~/.cache/boe-consolidada-mcp/sin-aviso-actualizacion`.
+
 **El verificador detecta el patrón «art. N + norma».** Coge enumeraciones («arts. 9, 10 y 11 del ET»), apartados («art. 24.2 CE») y ordinales («art. 348 bis»). No detecta citas por nombre de precepto sin número ni referencias implícitas del tipo «el artículo anterior».
 
 ---

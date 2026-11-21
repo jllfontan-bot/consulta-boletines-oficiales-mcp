@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
 const RAIZ = dirname(fileURLToPath(import.meta.url));
 
 /** Ficheros que entran en el paquete, en orden. */
-const CONTENIDO = ['manifest.json', 'package.json', 'LICENSE', 'LICENCIA-EUPL-1.2.txt', 'server/nucleo.js', 'server/index.js'];
+const CONTENIDO = ['manifest.json', 'package.json', 'LICENSE', 'LICENCIA-EUPL-1.2.txt', 'server/nucleo.js', 'server/actualizacion.js', 'server/index.js'];
 
 /* --------------------------- CRC32 --------------------------- */
 
